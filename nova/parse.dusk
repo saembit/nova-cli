@@ -50,6 +50,26 @@ export func parseStateNew(rootc: *Command, argv: string[]) -> *ParseState {
 }
 
 /**
+ * parseStateFree
+ * Frees the chain, pos and toks vectors of a scanner, the commands and strings inside them are borrowed and stay, the state struct itself is left for its owner to free, nothing handed out from the state may be used after this returns
+ * @param st {*ParseState} - the scanner whose vectors to free
+ * @return nothing
+ **/
+export func parseStateFree(st: *ParseState) -> void {
+    // Free the chain vector
+    vec_free((*st).chain)
+    free((*st).chain)
+
+    // Free the positional vector
+    vec_free((*st).pos)
+    free((*st).pos)
+
+    // Free the token vector
+    vec_free((*st).toks)
+    free((*st).toks)
+}
+
+/**
  * parseCur
  * Gets the deepest command found so far, the last chain entry
  * @param st {*ParseState} - the scanner

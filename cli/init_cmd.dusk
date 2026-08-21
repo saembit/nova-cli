@@ -55,7 +55,7 @@
  **/
 func initDefaultSource() -> string {
     // dawn assumes https for a bare host/owner/repo, so this needs no scheme
-    return "github.com/choice404/nova-cli"
+    return "github.com/saembit/nova-cli"
 }
 
 /**
@@ -395,7 +395,7 @@ export func initCmd() -> *Command {
     // The long description shown by --help
     c.setLong("Initialize a nova application in --dir: a package.dawn requiring the nova library, a root program, a cmd/ directory holding the root command, and a .gitignore. `dawn get` then fetches nova into dawn_modules/, which --no-fetch skips.\nThe name defaults to the last component of --dir, or \"app\" when --dir is \".\".\n--vendor writes the pre-1.14 shape instead: the library copied into <dir>/nova, reached from cmd/ through a symlink, and no requirement in the manifest. --link symlinks that copy.\nExisting files are never overwritten.")
     // The examples shown under it
-    c.setExample("  nova-cli init myapp --dir myapp\n  nova-cli init --dir . --ref v0.1.0\n  nova-cli init myapp --dir myapp --vendor")
+    c.setExample("  nova-cli init myapp --dir myapp\n  nova-cli init --dir . --ref v0.1.1\n  nova-cli init myapp --dir myapp --vendor")
 
     // At most one positional, the name
     c.setArgs(argsMax(1))

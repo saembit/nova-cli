@@ -39,7 +39,7 @@ export struct Flag {
 
 /**
  * FlagSet
- * A set of flags in declaration order, build with flagsetNew() and pass by pointer, the set is never freed
+ * A set of flags in declaration order, build with flagsetNew() and pass by pointer, freeAll frees the flags and the item vector and the owner frees the set itself, novaFreeTree does both for every set in a tree
  **/
 export struct FlagSet {
     items: *Vector<*Flag>,
@@ -585,5 +585,28 @@ impl FlagSet {
             (*f).changed = false
             i = i + 1
         }
+    }
+
+    /**
+     * freeAll
+     * Frees every Flag in the set and the item vector, the set struct itself is left for the owner to free
+     * @return nothing
+     **/
+    func freeAll() -> void {
+        // The item vector
+        items: *Vector<*Flag> = self.items
+
+        // Loop taking flags off the back
+        while vec_len(items) > 0 {
+            // The last flag, now owned here
+            f: *Flag = vec_take(items, vec_len(items) - 1)
+
+            // Free the flag
+            free(f)
+        }
+
+        // Free the vector buffer and the vector
+        vec_free(items)
+        free(self.items)
     }
 }

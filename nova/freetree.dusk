@@ -1,0 +1,77 @@
+/**
+ * nova/freetree.dusk
+ * novaFreeTree, frees a whole Command tree once the run is over, every node reachable from the root along with its vectors and both of its FlagSets, the strings are left alone since they are borrowed literals or argv
+ * The walk is a worklist taken from the back rather than recursion, a node is freed after its children are queued so no child is reached through a freed parent
+ **/
+@paradigm oop
+@paradigm procedural
+
+@import std.vector
+@import flagset
+@import command
+
+/**
+ * freetreeFields
+ * Frees what one Command node owns, its aliases, validArgs and kids vectors and both FlagSets, the node itself is left for its owner and the children must already be queued elsewhere since the kids vector goes too
+ * @param n {*Command} - the node whose fields to free
+ * @return nothing
+ **/
+func freetreeFields(n: *Command) -> void {
+    // Free the alias vector
+    vec_free((*n).aliases)
+    free((*n).aliases)
+
+    // Free the valid arg vector
+    vec_free((*n).validArgs)
+    free((*n).validArgs)
+
+    // Free the child vector, the children themselves are on the worklist
+    vec_free((*n).kids)
+    free((*n).kids)
+
+    // Free the flags in the local set then the set
+    lf: *FlagSet = (*n).flags
+    lf.freeAll()
+    free((*n).flags)
+
+    // Free the flags in the persistent set then the set
+    pf: *FlagSet = (*n).pflags
+    pf.freeAll()
+    free((*n).pflags)
+}
+
+/**
+ * novaFreeTree
+ * Frees every Command reachable from rootc, the root included, along with each node's vectors and FlagSets, the builtin help and completion commands and the --version flag novaExecute added are nodes and flags like any other so they go too, nothing in the tree may be used after this returns
+ * @param rootc {*Command} - the root of the tree to free
+ * @return nothing
+ **/
+export func novaFreeTree(rootc: *Command) -> void {
+    // The worklist of commands still to free, starting at the root
+    work: *Vector<*Command> = alloc(vec_new())
+    vec_push(work, rootc)
+
+    // Loop taking nodes off the back until none are left
+    while vec_len(work) > 0 {
+        // The last node, now owned here
+        n: *Command = vec_take(work, vec_len(work) - 1)
+
+        // The node's child vector
+        kids: *Vector<*Command> = (*n).kids
+
+        // Queue every child before the node goes
+        mut i: int64 = 0
+        while i < vec_len(kids) {
+            vec_push(work, vec_get(kids, i))
+            i = i + 1
+        }
+
+        // Free what the node owns then the node
+        freetreeFields(n)
+        free(n)
+    }
+
+    // Free the worklist
+    vec_free(work)
+    free(work)
+}

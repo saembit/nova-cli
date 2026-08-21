@@ -1,0 +1,155 @@
+// Unit test root for nova/freetree.dusk. Run it with cd tests/unit && dusk run free_test.dusk 2>&1 | diff - free_test.expected.
+// A tree shaped like exec_test's is executed twice so the builtin help and completion
+// commands and the synthesized --version flag exist, then novaFreeTree frees the whole
+// thing. dusk's generational heap aborts with fatal: on a use after free or a double free,
+// so a run that reaches the last line is the proof. A second tree is freed without ever
+// being executed and a third is a bare root with nothing on it.
+// Each argv is a fixed array minted as collector<string[]> for the same reason exec_test
+// does it, novaExecute stores argv in a heap Context handed to opaque handlers.
+@paradigm oop
+@paradigm procedural
+
+// Stdlib pieces the tree leans on
+@import std.string
+@import std.vector
+
+// The library, the free walk and everything executing touches
+@import nova.command
+@import nova.context
+@import nova.flagset
+@import nova.args
+@import nova.text
+@import nova.exec
+@import nova.freetree
+
+/**
+ * rootPpre
+ * Prints the root persistentPreRun line together with the command it is running for
+ * @param ctx {*Context} - the run context nova hands to the hook
+ * @return int32 - 0 so the chain keeps going
+ **/
+func rootPpre(ctx: *Context) -> int32 {
+    // The path shows which command inherited the hook
+    println("hook: root persistentPreRun for " + ctx.commandPath())
+
+    // Keep the chain going
+    return 0
+}
+
+/**
+ * serveRun
+ * Prints the flags serve can see, local and inherited
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func serveRun(ctx: *Context) -> int32 {
+    // The local flags plus the persistent ones inherited from the root
+    println("serve: port={} host={} verbose={} nargs={}", ctx.getInt("port"), ctx.getStr("host"), textBool(ctx.getBool("verbose")), ctx.nargs())
+
+    // Serving cannot fail here
+    return 0
+}
+
+/**
+ * greetRun
+ * Prints the greeting
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - 0
+ **/
+func greetRun(ctx: *Context) -> int32 {
+    // The name and the required --from flag
+    println("greet: {} from {}", ctx.arg(0), ctx.getStr("from"))
+
+    // Any name is fine
+    return 0
+}
+
+/**
+ * buildRoot
+ * Builds the tree, a root with persistent flags and a hook, serve with an alias and local flags, greet with a required flag, and a shadow command with a child of its own
+ * @return *Command - the root of the tree
+ **/
+func buildRoot() -> *Command {
+    // The root with a version so --version is synthesized on execute
+    root: *Command = cmdNew("app", "A test application")
+    root.setLong("app exercises novaFreeTree.")
+    root.setVersion("0.1.0")
+    root.persistentFlags().addBool("verbose", "v", false, "verbose output")
+    root.persistentFlags().addStr("config", "c", "", "config file")
+    root.setPersistentPreRun(rootPpre)
+
+    // serve carries an alias, an arg rule, local flags and a deprecated flag
+    serve: *Command = cmdNew("serve [flags]", "Start the server")
+    serve.addAlias("s")
+    serve.setArgs(argsNone())
+    serve.localFlags().addInt("port", "p", 8080, "port to listen on")
+    serve.localFlags().addStr("host", "", "localhost", "host to bind")
+    serve.localFlags().addBool("debug", "d", false, "debug mode")
+    serve.localFlags().addStr("legacy", "", "", "old option")
+    serve.localFlags().markDeprecated("legacy", "use --host instead")
+    serve.setRun(serveRun)
+    root.addCommand(serve)
+
+    // greet carries valid args and a required flag
+    greet: *Command = cmdNew("greet <name>", "Greet someone")
+    greet.setArgs(argsExact(1))
+    greet.addValidArg("bob")
+    greet.addValidArg("ann")
+    greet.localFlags().addStr("from", "", "", "who greets")
+    greet.localFlags().markRequired("from")
+    greet.setRun(greetRun)
+    root.addCommand(greet)
+
+    // shadow and deep make the tree two levels deep
+    shadow: *Command = cmdNew("shadow", "Shadow the root's --verbose")
+    shadow.persistentFlags().addStr("verbose", "v", "", "verbosity level")
+    deep: *Command = cmdNew("deep", "A grandchild")
+    deep.setRun(serveRun)
+    shadow.addCommand(deep)
+    root.addCommand(shadow)
+
+    // Hand the tree back
+    return root
+}
+
+/**
+ * main
+ * Executes a tree twice, frees it, then frees a tree that never ran and a bare root
+ * @param argc {int32} - unused
+ * @param argv {string[]} - unused
+ * @return int32 - 0
+ **/
+func main(argc: int32, argv: string[]) -> int32 {
+    // The executed tree
+    root: *Command = buildRoot()
+
+    // Run it twice so the builtin help and completion commands and the --version flag are there
+    println("## execute twice")
+    a1: string[6] = ["app", "serve", "-p", "1", "--host=example.org", "-v"]
+    c1: int32 = novaExecute(root, collector<string[]>(a1[0..a1.len]))
+    println("== app serve -p 1 --host=example.org -v -> {}", c1)
+    a2: string[2] = ["app", "--version"]
+    c2: int32 = novaExecute(root, collector<string[]>(a2[0..a2.len]))
+    println("== app --version -> {}", c2)
+
+    // The node and flag counts the walk is about to free
+    println("root kids={} root flags={} root pflags={}", root.numChildren(), root.localFlags().len(), root.persistentFlags().len())
+
+    // Free the whole tree
+    novaFreeTree(root)
+    println("freed ok: executed tree")
+
+    // A tree that was built but never executed
+    fresh: *Command = buildRoot()
+    println("fresh kids={}", fresh.numChildren())
+    novaFreeTree(fresh)
+    println("freed ok: never executed tree")
+
+    // A bare root with no children and no flags
+    bare: *Command = cmdNew("bare", "Nothing on it")
+    novaFreeTree(bare)
+    println("freed ok: bare root")
+
+    // Done
+    return 0
+}

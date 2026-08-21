@@ -1,7 +1,7 @@
 /**
  * nova/command.dusk
  * The Command tree, a Command carries its use line, help text, local and persistent flags, children, hooks and the positional arg validator, novaExecute walks the tree argv describes and dispatches to the handlers
- * Commands are heap values built by cmdNew and linked with addCommand, the tree lives for the whole process and is never freed, a duplicate child name aborts with "fatal: nova: ..." on stderr
+ * Commands are heap values built by cmdNew and linked with addCommand, the tree lives until novaFreeTree in freetree.dusk frees it, usually at the end of main, a duplicate child name aborts with "fatal: nova: ..." on stderr
  **/
 @paradigm oop
 @paradigm procedural

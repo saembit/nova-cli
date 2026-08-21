@@ -15,7 +15,7 @@
 
 /**
  * Context
- * The handler's view of one invocation, built by novaExecute and borrowed by every hook, never freed
+ * The handler's view of one invocation, built by novaExecute, borrowed by every hook and freed by novaExecute once the hooks are done, a hook must not keep it
  **/
 export struct Context {
     cmd: *Command,

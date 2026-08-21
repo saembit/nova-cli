@@ -230,18 +230,15 @@ func execUnknownCommand(subject: *Command, word: string) -> int32 {
 }
 
 /**
- * novaExecute
- * Fixes up the tree, finds the command argv names, parses its flags and runs it
+ * execDispatch
+ * Runs both scanner passes over st and then does what argv asked for, help, version, an error report or the hooks of the command found
  * @param rootc {*Command} - the root command of the tree
- * @param argv {string[]} - the raw argv, argv[0] is the program name and is skipped
- * @return the exit code, the handler's return, 0 after help or version, 1 on a usage error
+ * @param st {*ParseState} - the fresh scanner, borrowed, novaExecute frees it after
+ * @param argv {string[]} - the raw argv handed to the Context
+ * @return the exit code
  **/
-export func novaExecute(rootc: *Command, argv: string[]) -> int32 {
-    // Fix up the tree before scanning
-    execFixup(rootc)
-
+func execDispatch(rootc: *Command, st: *ParseState, argv: string[]) -> int32 {
     // Run both passes of the scanner
-    st: *ParseState = parseStateNew(rootc, argv)
     parseFind(st)
     perr: error = parseAll(st)
 
@@ -305,5 +302,36 @@ export func novaExecute(rootc: *Command, argv: string[]) -> int32 {
 
     // Build the context and run the hooks
     ctx: *Context = alloc(Context { cmd: curc, root: rootc, chain: chain, args: pos, argv: argv })
-    return execRunHooks(ctx)
+    code: int32 = execRunHooks(ctx)
+
+    // Free the context now that every hook is done
+    free(ctx)
+
+    // Return the hook chain's code
+    return code
+}
+
+/**
+ * novaExecute
+ * Fixes up the tree, finds the command argv names, parses its flags and runs it, the scanner state and the Context live only for this call and are freed before it returns
+ * @param rootc {*Command} - the root command of the tree
+ * @param argv {string[]} - the raw argv, argv[0] is the program name and is skipped
+ * @return the exit code, the handler's return, 0 after help or version, 1 on a usage error
+ **/
+export func novaExecute(rootc: *Command, argv: string[]) -> int32 {
+    // Fix up the tree before scanning
+    execFixup(rootc)
+
+    // The scanner state for this call
+    st: *ParseState = parseStateNew(rootc, argv)
+
+    // Scan and run
+    code: int32 = execDispatch(rootc, st, argv)
+
+    // Free the scanner's chain, pos and toks vectors then the scanner
+    parseStateFree(st)
+    free(st)
+
+    // Return the exit code
+    return code
 }

@@ -27,13 +27,13 @@ nova needs dusk 1.14 or newer, since that's where the package manifest landed. I
 ```console
 $ mkdir myapp && cd myapp
 $ dawn init myapp
-$ dawn add nova github.com/choice404/nova-cli v0.1.0
+$ dawn add nova github.com/saembit/nova-cli v0.1.1
 ```
 
 dawn add fetches the package into dawn_modules/nova, records the commit in dawn.lock, and writes the @require line into package.dawn, and after that every file in the project just writes @import nova.command and builds offline, cmd/serve_cmd.dusk included, since alias resolution is manifest wide and the compiler never touches the network. For the generator itself, clone this repository and build the binary, which lands in target/dusk-out/nova-cli.
 
 ```console
-$ git clone https://github.com/choice404/nova-cli
+$ git clone https://github.com/saembit/nova-cli
 $ cd nova-cli
 $ dusk build nova-cli.dusk
 ```
@@ -189,7 +189,7 @@ init writes package.dawn holding @package, @version, @dusk 1.14, @root and the @
 
 ```text
 --dir, -d       directory to scaffold into (default .)
---source, -s    repository to require nova from (default github.com/choice404/nova-cli)
+--source, -s    repository to require nova from (default github.com/saembit/nova-cli)
 --ref, -r       tag, branch or commit to pin it at (default v plus the library version)
 --no-fetch      write the manifest, skip dawn get
 --vendor        copy the library into <dir>/nova and link cmd/nova, no @require line
@@ -221,6 +221,6 @@ $ tests/gen.sh --no-build --keep  # reuse the binary, leave the sandbox behind
 
 # Status
 
-There's a fair amount that isn't done. The command tree is never freed, it lives for the whole process and a nova_free_tree is future work, the library needs dusk 1.14 or newer since it leans on the package manifest as well as @paradigm oop plus procedural, self referencing vectors, function typed struct fields, etc. and dawn has no version ranges, so a reference is one tag, branch or commit and a diamond in the dependency graph is something you pin yourself. init --vendor and init --link still write the pre 1.14 shape for a tree that has to build with no dawn at all, they find the library through NOVA_HOME or by walking up from the running binary. The examples in this repository are the odd ones out, they use symlinks to reach nova because they sit inside the nova-cli package itself and a package can't require itself. Completion is static and covers bash and zsh only, error messages follow Cobra 1.x but print the help hint instead of a full usage dump, and library misuse such as a duplicate flag, a duplicate command name, a getter for a flag that doesn't exist, etc. aborts with fatal: nova: <msg> on stderr rather than handing you an error to deal with.
+There's a fair amount that isn't done. The command tree lives for the whole process and novaFreeTree in nova/freetree.dusk frees it at the end of main if you want it gone, it frees every command, their vectors and both flag sets but not the strings since those are your literals or argv, the library needs dusk 1.14 or newer since it leans on the package manifest as well as @paradigm oop plus procedural, self referencing vectors, function typed struct fields, etc. and dawn has no version ranges, so a reference is one tag, branch or commit and a diamond in the dependency graph is something you pin yourself. init --vendor and init --link still write the pre 1.14 shape for a tree that has to build with no dawn at all, they find the library through NOVA_HOME or by walking up from the running binary. The examples in this repository are the odd ones out, they use symlinks to reach nova because they sit inside the nova-cli package itself and a package can't require itself. Completion is static and covers bash and zsh only, error messages follow Cobra 1.x but print the help hint instead of a full usage dump, and library misuse such as a duplicate flag, a duplicate command name, a getter for a flag that doesn't exist, etc. aborts with fatal: nova: <msg> on stderr rather than handing you an error to deal with.
 
 It may not be perfect but it's better than nothing.

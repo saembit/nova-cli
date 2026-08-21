@@ -1,8 +1,8 @@
 // nova-cli: a Cobra-style CLI framework for dusk, plus the nova-cli generator.
-// Dependents spell `@require nova github.com/choice404/nova-cli <tag>` and then
+// Dependents spell `@require nova github.com/saembit/nova-cli <tag>` and then
 // `@import nova.command`, `@import nova.exec`, ... : the alias is the first
 // segment and the rest walks under the directory @root names, nova/.
 @package nova-cli
-@version 0.1.0
+@version 0.1.1
 @dusk 1.14
 @root nova/nova.dusk

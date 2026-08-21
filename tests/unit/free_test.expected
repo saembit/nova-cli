@@ -1,0 +1,11 @@
+## execute twice
+hook: root persistentPreRun for app serve
+serve: port=1 host=example.org verbose=true nargs=0
+== app serve -p 1 --host=example.org -v -> 0
+app version 0.1.0
+== app --version -> 0
+root kids=5 root flags=1 root pflags=2
+freed ok: executed tree
+fresh kids=3
+freed ok: never executed tree
+freed ok: bare root
