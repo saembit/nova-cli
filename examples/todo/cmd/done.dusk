@@ -1,0 +1,70 @@
+// todo done <id> --by <who> takes exactly one positional argument plus a
+// required flag, and reports a bad id itself through ctx.fail.
+@paradigm procedural
+
+// The command type, the run context, the flag sets and the argument rules
+@import nova.command
+@import nova.context
+@import nova.flagset
+@import nova.args
+
+// parse_int
+@import std.string
+
+/**
+ * runDone
+ * Parses the item id and prints who marked it done, failing when the id is not a number
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - 0 on success, or whatever ctx.fail returns for a bad id
+ **/
+func runDone(ctx: *Context) -> int32 {
+    // The id exactly as it was typed
+    raw: string = ctx.arg(0)
+
+    // The id as a number, plus the error parsing it may have produced
+    id, e := parse_int(raw)
+
+    // Check if the id did not parse, then report it the way nova reports its own errors
+    if e.exists() {
+        return ctx.fail("invalid id \"" + raw + "\"")
+    }
+
+    // Who completed the item, from the required --by flag
+    by: string = ctx.getStr("by")
+
+    // Check if the root's persistent --verbose was passed
+    if ctx.getBool("verbose") {
+        println("verbose: on")
+    }
+
+    // Nothing is persisted, so just report what would have happened
+    println("marked {} done by {}", id, by)
+
+    // The id parsed and the flag was there
+    return 0
+}
+
+/**
+ * doneCmd
+ * Builds the done command, one positional id plus a required --by flag
+ * @return *Command - the done subcommand
+ **/
+export func doneCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("done", "Mark a todo item done")
+
+    // Exactly one positional argument, the id
+    c.setArgs(argsExact(1))
+
+    // The handler
+    c.setRun(runDone)
+
+    // Who completed the item, no shorthand and no default
+    c.localFlags().addStr("by", "", "", "who completed it")
+
+    // nova rejects the run itself when --by is missing
+    c.localFlags().markRequired("by")
+
+    // Hand the finished command back to the caller
+    return c
+}

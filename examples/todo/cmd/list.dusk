@@ -1,0 +1,58 @@
+// todo list, aliased ls, takes no positional arguments.
+@paradigm procedural
+
+// The command type, the run context, the flag sets and the argument rules
+@import nova.command
+@import nova.context
+@import nova.flagset
+@import nova.args
+
+/**
+ * runList
+ * Prints the fixed demo list, with the completed item only when --all is set
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runList(ctx: *Context) -> int32 {
+    // Check if the root's persistent --verbose was passed
+    if ctx.getBool("verbose") {
+        println("verbose: on")
+    }
+
+    // The two outstanding items
+    println("1. buy milk")
+    println("2. write nova")
+
+    // Check if --all was passed, then show the completed item as well
+    if ctx.getBool("all") {
+        println("3. ship it (done)")
+    }
+
+    // Listing cannot fail
+    return 0
+}
+
+/**
+ * listCmd
+ * Builds the list command with its ls alias and its local --all flag
+ * @return *Command - the list subcommand
+ **/
+export func listCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("list", "List todo items")
+
+    // A second spelling that resolves to the same command
+    c.addAlias("ls")
+
+    // list takes no positional arguments
+    c.setArgs(argsNone())
+
+    // The handler
+    c.setRun(runList)
+
+    // Whether completed items are included
+    c.localFlags().addBool("all", "a", false, "include completed items")
+
+    // Hand the finished command back to the caller
+    return c
+}

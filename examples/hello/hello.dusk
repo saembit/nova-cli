@@ -1,0 +1,130 @@
+// hello is the smallest nova application there is, one root command with three
+// flags and a free form positional tail. Build it from this directory with
+// dusk build hello.dusk, and note that the nova entry beside this file is a
+// symlink to the library at the repository root, which is how the
+// @import nova.command line below resolves.
+@paradigm procedural
+
+// The nova library: the command tree, the run context, flags, argument rules
+// and the executor
+@import nova.command
+@import nova.context
+@import nova.flagset
+@import nova.args
+@import nova.exec
+
+// StringBuilder and to_upper
+@import std.string
+
+/**
+ * runHello
+ * Prints the greeting once per --times, upper cased when --shout is set
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runHello(ctx: *Context) -> int32 {
+    // Who to greet, from --name until a positional argument overrides it
+    mut who: string = ctx.getStr("name")
+
+    // The number of positional arguments the parser collected
+    n: int64 = ctx.nargs()
+
+    // Check if any positionals were given, they replace --name joined with single spaces
+    if n > 0 {
+        // Builder the joined name is assembled in
+        sb: *StringBuilder = alloc(sb_new())
+
+        // Index of the current argument
+        mut i: int64 = 0
+
+        // Loop iterating through the positional arguments
+        while i < n {
+            // Separate every argument after the first with a space
+            if i > 0 {
+                sb_push(sb, " ")
+            }
+
+            // Append the current argument
+            sb_push(sb, ctx.arg(i))
+
+            // Move to the next argument
+            i = i + 1
+        }
+
+        // The joined arguments become the name
+        who = sb_cstr(sb)
+    }
+
+    // The greeting line before any casing is applied
+    mut greeting: string = "Hello, " + who + "!"
+
+    // Check if --shout was passed, then upper case the whole line
+    if ctx.getBool("shout") {
+        greeting = to_upper(greeting)
+    }
+
+    // How many copies of the greeting to print, from --times
+    times: int64 = ctx.getInt("times")
+
+    // Counter for the greetings printed so far
+    mut k: int64 = 0
+
+    // Loop printing the greeting until the count is reached
+    while k < times {
+        // Print one copy of the greeting
+        println(greeting)
+
+        // Move to the next copy
+        k = k + 1
+    }
+
+    // Nothing here can fail so the exit code is always 0
+    return 0
+}
+
+/**
+ * helloCmd
+ * Builds the root command with its long help, its argument rule and its three local flags
+ * @return *Command - the root command, ready for novaExecute
+ **/
+func helloCmd() -> *Command {
+    // The root command, name and one line description
+    c: *Command = cmdNew("hello", "Print a friendly greeting")
+
+    // The long description shown by hello --help
+    c.setLong("hello prints a friendly greeting.\n\nThe greeting is repeated --times times, and any positional arguments\nare joined with spaces and used instead of --name.")
+
+    // Any number of positional arguments is fine
+    c.setArgs(argsAny())
+
+    // The handler, a named top level function because a lambda that captured a
+    // local could not outlive the frame that built the command tree
+    c.setRun(runHello)
+
+    // Who to greet when no positional arguments are given
+    c.localFlags().addStr("name", "n", "world", "who to greet")
+
+    // Whether to upper case the greeting
+    c.localFlags().addBool("shout", "s", false, "shout the greeting")
+
+    // How many times to repeat the greeting
+    c.localFlags().addInt("times", "t", 1, "how many times to greet")
+
+    // Hand the finished command back to the caller
+    return c
+}
+
+/**
+ * main
+ * Builds the command tree and hands the command line to nova
+ * @param argc {int32} - the argument count, unused here
+ * @param argv {string[]} - the raw command line, program name first
+ * @return int32 - the exit code novaExecute produced
+ **/
+func main(argc: int32, argv: string[]) -> int32 {
+    // The command tree, one command deep
+    root: *Command = helloCmd()
+
+    // Parse argv against the tree, run the handler and return its exit code
+    return novaExecute(root, argv)
+}

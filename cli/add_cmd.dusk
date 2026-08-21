@@ -1,0 +1,185 @@
+/**
+ * cli/add_cmd.dusk
+ * nova-cli add <name>, one new subcommand inside an existing project
+ *
+ * It writes <dir>/cmd/<id>_cmd.dusk from the subcommand template and then splices two lines
+ * into the parent's constructor file, the @import and the addCommand call. Wiring is
+ * idempotent, so running add twice over the same name touches nothing the second time.
+ *
+ * The file is named after the module rather than the raw name, so nova-cli add my-cmd writes
+ * cmd/my_cmd_cmd.dusk exporting my_cmdCmd() while the command a user types stays my-cmd.
+ * There are two reasons for the _cmd suffix on the file. dusk's @import takes an identifier
+ * path, so @import my-cmd would not parse, and the first segment of every @import in the
+ * merged program becomes a global qualifier, so a module called c would break every
+ * c.addCommand(...) in the application, which is the very line this file writes. A module
+ * called c_cmd collides with nothing, and a module and a function may share a name.
+ *
+ * add writes source and nothing else. Since dusk 1.14 a generated project reaches the
+ * library through its manifest's @require nova, and alias resolution is manifest wide, so a
+ * new file under cmd/ needs no path of its own to nova/. A --vendor project still needs the
+ * cmd/nova symlink, and still has it, since nova-cli init --vendor wrote it beside the
+ * cmd/root.dusk this command requires to already be there.
+ *
+ * Every export carries the add prefix.
+ **/
+
+@paradigm procedural
+
+@import nova.command
+@import nova.context
+@import nova.flagset
+@import nova.args
+
+@import std.string
+@import std.fs
+
+@import scaffold
+@import templates
+
+/**
+ * addParentIdent
+ * The identifier of the parent command, which names its constructor and its file
+ * @param parent {string} - the --parent value
+ * @return "root" for the root command, else the sanitized parent name
+ **/
+func addParentIdent(parent: string) -> string {
+    // The root command keeps its plain name
+    if str_eq(parent, "root") {
+        return "root"
+    }
+
+    // Everything else is sanitized the same way a child is
+    return scaffoldIdent(parent)
+}
+
+/**
+ * addParentPath
+ * The constructor file a new child is wired into
+ * @param dir {string} - the project directory
+ * @param parent {string} - the --parent value
+ * @return the path to the parent's constructor file
+ **/
+func addParentPath(dir: string, parent: string) -> string {
+    // The root command lives in cmd/root.dusk
+    if str_eq(parent, "root") {
+        return path_join(dir, "cmd/root.dusk")
+    }
+
+    // A nested parent lives where an earlier add put it
+    return path_join(dir, "cmd/" + scaffoldIdent(parent) + "_cmd.dusk")
+}
+
+/**
+ * addRun
+ * Writes the subcommand file and wires it into its parent, the add handler
+ * @param ctx {*Context} - the running context
+ * @return 0 on success, 2 when the file was written but its parent held no anchors, 1 with
+ * an Error line on an illegal name, a missing parent, or a failed write
+ **/
+func addRun(ctx: *Context) -> int32 {
+    // The subcommand name as typed
+    name: string = ctx.arg(0)
+    // The project directory to write into
+    dir: string = ctx.getStr("dir")
+    // The command the new one is hung off
+    parent: string = ctx.getStr("parent")
+
+    // Both names are spliced into source and into paths, so both are checked first
+    if !scaffoldValidName(name) {
+        return ctx.fail("invalid command name \"" + name + "\"")
+    }
+    if !scaffoldValidName(parent) {
+        return ctx.fail("invalid command name \"" + parent + "\"")
+    }
+
+    // The sanitized identifier the file and the constructor are named after
+    id: string = scaffoldIdent(name)
+    // The module name, which is also the file stem
+    module: string = id + "_cmd"
+    // The constructor the parent calls
+    ctor: string = id + "Cmd"
+    // Where the file goes, relative to the project
+    rel: string = "cmd/" + module + ".dusk"
+    // Where the file goes on disk
+    path: string = path_join(dir, rel)
+    // The parent's identifier
+    parentIdent: string = addParentIdent(parent)
+    // The parent's constructor file
+    parentPath: string = addParentPath(dir, parent)
+
+    // A command cannot be its own parent, by constructor name or by file
+    sameCtor: bool = str_eq(ctor, parentIdent + "Cmd") || str_eq(ctor, "rootCmd")
+    if sameCtor || str_eq(path, parentPath) {
+        return ctx.fail("cannot add a command to itself")
+    }
+
+    // There is nothing to wire into when the parent file is not there
+    if !scaffoldExists(parentPath) {
+        return ctx.fail("no such parent command file: " + parentPath + "; run nova-cli init first, or pass --dir")
+    }
+
+    // Make cmd/ before writing into it
+    de := scaffoldMkdir(path_join(dir, "cmd"))
+    if de.exists() {
+        return ctx.fail(de.message)
+    }
+
+    // Write the subcommand file, leaving an existing one alone
+    made, we := scaffoldWriteIfAbsent(path, tplSubCmd(name, parent))
+    if we.exists() {
+        return ctx.fail(we.message)
+    }
+
+    // Report which of the two happened
+    if made {
+        println("created  {}", path)
+    } else {
+        println("exists, skipping  {}", path)
+    }
+
+    // Splice the import and the addCommand call into the parent
+    wired, ae := scaffoldAddWiring(parentPath, parentIdent, name)
+    if ae.exists() {
+        return ctx.fail(ae.message)
+    }
+
+    // A parent with no anchors is left alone and the two lines are handed to the user
+    if !wired {
+        printerr("warning: " + parentPath + ": no 'export func " + parentIdent + "Cmd() -> *Command' with a 'return c' to wire into")
+        printerr("warning: add '@import " + module + "' and 'c.addCommand(" + ctor + "())' to " + parentPath + " by hand")
+        return int32(2)
+    }
+
+    // Report the parent that was rewritten
+    println("wired into {}", parentPath)
+
+    // Report success
+    return int32(0)
+}
+
+/**
+ * addCmd
+ * The add command, nova-cli add <name> [--parent root] [--dir path]
+ * @return a fresh command, owned by the tree it is added to
+ **/
+export func addCmd() -> *Command {
+    // The command itself
+    c: *Command = cmdNew("add <name>", "Add a subcommand to a nova application")
+
+    // The long description shown by --help
+    c.setLong("Write cmd/<name>_cmd.dusk from the subcommand template and wire it into its parent's constructor.\nThe name must match [A-Za-z][A-Za-z0-9_-]* and is sanitized for the file name and the constructor only: \"my-cmd\" lands in cmd/my_cmd_cmd.dusk exporting my_cmdCmd() but is still typed as my-cmd.\nThe _cmd suffix keeps the module name a generated @import introduces from shadowing a variable of the same name anywhere in the application.")
+    // The examples shown under it
+    c.setExample("  nova-cli add serve\n  nova-cli add config --parent serve --dir myapp")
+
+    // Exactly one positional, the name
+    c.setArgs(argsExact(1))
+    // The handler
+    c.setRun(addRun)
+
+    // The two flags the handler reads
+    c.localFlags().addStr("parent", "p", "root", "parent command to wire the new command into")
+    c.localFlags().addStr("dir", "d", ".", "project directory")
+
+    // Return the finished command
+    return c
+}

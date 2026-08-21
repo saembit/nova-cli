@@ -1,0 +1,16 @@
+/**
+ * nova/nova.dusk
+ * The package root named by package.dawn's @root, a dependent that writes @require nova github.com/choice404/nova-cli <tag> imports the modules beside this file through the alias, such as @import nova.command, @import nova.exec, @import nova.context, etc.
+ * The short form @import nova.novaVersion reads a symbol this file exports
+ **/
+@paradigm procedural
+
+/**
+ * novaVersion
+ * Gives the library version, the tag a dependent pins is "v" plus this string
+ * @return the nova version string
+ **/
+export func novaVersion() -> string {
+    // Return the version
+    return "0.1.0"
+}

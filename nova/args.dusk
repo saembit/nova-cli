@@ -1,0 +1,207 @@
+/**
+ * nova/args.dusk
+ * Positional argument validators, the Cobra PositionalArgs family, a command carries one ArgSpec and the executor calls argsValidateFirst with the positional count after flag parsing
+ **/
+@paradigm oop
+@paradigm procedural
+
+@import std.string
+
+/**
+ * ArgsKind
+ * How many positional arguments a command accepts
+ **/
+export enum ArgsKind { ArgsAny, ArgsNone, ArgsExact, ArgsMin, ArgsMax, ArgsRange }
+
+/**
+ * ArgSpec
+ * A validator, the kind plus the bounds it uses, lo for Exact and Min, hi for Max, both for Range, unused bounds are 0
+ **/
+export struct ArgSpec {
+    kind: ArgsKind,
+    lo: int64,
+    hi: int64,
+}
+
+/**
+ * argsAny
+ * Makes the validator that accepts any number of arguments, the default
+ * @return the spec
+ **/
+export func argsAny() -> ArgSpec {
+    // Return the any spec
+    return ArgSpec { kind: ArgsKind.ArgsAny, lo: 0, hi: 0 }
+}
+
+/**
+ * argsNone
+ * Makes the validator that accepts no positional arguments
+ * @return the spec
+ **/
+export func argsNone() -> ArgSpec {
+    // Return the none spec
+    return ArgSpec { kind: ArgsKind.ArgsNone, lo: 0, hi: 0 }
+}
+
+/**
+ * argsExact
+ * Makes the validator that accepts exactly n arguments
+ * @param n {int64} - the count
+ * @return the spec
+ **/
+export func argsExact(n: int64) -> ArgSpec {
+    // Return the exact spec with both bounds at n
+    return ArgSpec { kind: ArgsKind.ArgsExact, lo: n, hi: n }
+}
+
+/**
+ * argsMin
+ * Makes the validator that accepts at least n arguments
+ * @param n {int64} - the minimum
+ * @return the spec
+ **/
+export func argsMin(n: int64) -> ArgSpec {
+    // Return the min spec
+    return ArgSpec { kind: ArgsKind.ArgsMin, lo: n, hi: 0 }
+}
+
+/**
+ * argsMax
+ * Makes the validator that accepts at most n arguments
+ * @param n {int64} - the maximum
+ * @return the spec
+ **/
+export func argsMax(n: int64) -> ArgSpec {
+    // Return the max spec
+    return ArgSpec { kind: ArgsKind.ArgsMax, lo: 0, hi: n }
+}
+
+/**
+ * argsRange
+ * Makes the validator that accepts between lo and hi arguments inclusive
+ * @param lo {int64} - the minimum
+ * @param hi {int64} - the maximum
+ * @return the spec
+ **/
+export func argsRange(lo: int64, hi: int64) -> ArgSpec {
+    // Return the range spec
+    return ArgSpec { kind: ArgsKind.ArgsRange, lo: lo, hi: hi }
+}
+
+/**
+ * argsMsg
+ * Builds "<a><n1><b><n2><c>" as a fresh heap error message
+ * @param a {string} - the first text
+ * @param n1 {int64} - the first number
+ * @param b {string} - the middle text
+ * @param n2 {int64} - the second number
+ * @param c {string} - the last text
+ * @return the error holding the message
+ **/
+func argsMsg(a: string, n1: int64, b: string, n2: int64, c: string) -> error {
+    // Builder for the message
+    sb: *StringBuilder = alloc(sb_new())
+
+    // Push the five parts in order
+    sb_push(sb, a)
+    sb_push_int(sb, n1)
+    sb_push(sb, b)
+    sb_push_int(sb, n2)
+    sb_push(sb, c)
+
+    // Copy the builder out to a fresh string
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+
+    // Free the builder
+    sb_free(sb)
+    free(sb)
+
+    // Return the error with the message
+    return error { message: out }
+}
+
+/**
+ * argsValidateFirst
+ * Checks n positional arguments against spec, the ArgsNone message names the first argument the way Cobra does
+ * @param spec {ArgSpec} - the validator
+ * @param n {int64} - the positional count
+ * @param first {string} - the first positional word, "" when n == 0
+ * @param cmdPath {string} - the command path, such as "app serve"
+ * @return a clean error when valid, else the Cobra wording
+ **/
+export func argsValidateFirst(spec: ArgSpec, n: int64, first: string, cmdPath: string) -> error {
+    // Check the count by the kind of the spec
+    match spec.kind {
+        ArgsAny => return error {},
+        ArgsNone => {
+            // Any argument at all is an unknown command
+            if n > 0 {
+                return error { message: "unknown command \"" + first + "\" for \"" + cmdPath + "\"" }
+            }
+            return error {}
+        },
+        ArgsExact => {
+            // The count must equal lo
+            if n != spec.lo {
+                return argsMsg("accepts ", spec.lo, " arg(s), received ", n, "")
+            }
+            return error {}
+        },
+        ArgsMin => {
+            // The count must be at least lo
+            if n < spec.lo {
+                return argsMsg("requires at least ", spec.lo, " arg(s), only received ", n, "")
+            }
+            return error {}
+        },
+        ArgsMax => {
+            // The count must be at most hi
+            if n > spec.hi {
+                return argsMsg("accepts at most ", spec.hi, " arg(s), received ", n, "")
+            }
+            return error {}
+        },
+        ArgsRange => {
+            // The count must be between lo and hi
+            if n < spec.lo || n > spec.hi {
+                // Builder for the three number message
+                sb: *StringBuilder = alloc(sb_new())
+
+                // Push the parts in order
+                sb_push(sb, "accepts between ")
+                sb_push_int(sb, spec.lo)
+                sb_push(sb, " and ")
+                sb_push_int(sb, spec.hi)
+                sb_push(sb, " arg(s), received ")
+                sb_push_int(sb, n)
+
+                // Copy the builder out to a fresh string
+                out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+
+                // Free the builder
+                sb_free(sb)
+                free(sb)
+
+                // Return the error with the message
+                return error { message: out }
+            }
+            return error {}
+        },
+    }
+
+    // Not reached, every arm returns, kept for the codegen
+    return error {}
+}
+
+/**
+ * argsValidate
+ * Checks n positional arguments against spec with no first word, a thin wrapper over argsValidateFirst
+ * @param spec {ArgSpec} - the validator
+ * @param n {int64} - the positional count
+ * @param cmdPath {string} - the command path, such as "app serve"
+ * @return a clean error when valid, else the Cobra wording
+ **/
+export func argsValidate(spec: ArgSpec, n: int64, cmdPath: string) -> error {
+    // Forward with an empty first word
+    return argsValidateFirst(spec, n, "", cmdPath)
+}

@@ -1,0 +1,14 @@
+List todo items
+
+Usage:
+  todo list [flags]
+
+Aliases:
+  list, ls
+
+Flags:
+  -a, --all    include completed items
+  -h, --help   help for list
+
+Global Flags:
+  -v, --verbose   verbose output

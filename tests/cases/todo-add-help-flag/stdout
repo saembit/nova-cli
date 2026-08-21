@@ -1,0 +1,13 @@
+Add a todo item.
+
+Every word after the command is joined with single spaces to form
+the item text.
+
+Usage:
+  todo add [flags]
+
+Flags:
+  -h, --help   help for add
+
+Global Flags:
+  -v, --verbose   verbose output

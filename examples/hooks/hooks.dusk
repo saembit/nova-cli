@@ -1,0 +1,376 @@
+// hooks shows the order nova runs hooks in, how a non zero return short
+// circuits the rest of the chain, and what disableFlagParsing does.
+//
+// The order per command is the nearest persistentPreRun (its own or the closest
+// ancestor's), then preRun, run, postRun, and finally the nearest
+// persistentPostRun. The first non zero return value stops the chain and
+// becomes the exit code.
+@paradigm procedural
+
+// The nova library: the command tree, the run context, argument rules and the executor
+@import nova.command
+@import nova.context
+@import nova.args
+@import nova.exec
+
+// String helpers used by the echo handler
+@import std.string
+
+/**
+ * hookRootPpre
+ * Prints the root persistentPreRun line, which runs for every command in the tree
+ * @param ctx {*Context} - the run context nova hands to the hook
+ * @return int32 - 0 so the chain keeps going
+ **/
+func hookRootPpre(ctx: *Context) -> int32 {
+    // Announce the hook
+    println("root persistentPreRun")
+
+    // Keep the chain going
+    return 0
+}
+
+/**
+ * hookRootPre
+ * Prints the root preRun line, which only runs when the root itself runs
+ * @param ctx {*Context} - the run context nova hands to the hook
+ * @return int32 - 0 so the chain keeps going
+ **/
+func hookRootPre(ctx: *Context) -> int32 {
+    // Announce the hook
+    println("root preRun")
+
+    // Keep the chain going
+    return 0
+}
+
+/**
+ * hookRootRun
+ * Prints the root run line
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - 0 so the chain keeps going
+ **/
+func hookRootRun(ctx: *Context) -> int32 {
+    // Announce the handler
+    println("root run")
+
+    // Keep the chain going
+    return 0
+}
+
+/**
+ * hookRootPost
+ * Prints the root postRun line, which only runs after a successful root run
+ * @param ctx {*Context} - the run context nova hands to the hook
+ * @return int32 - 0 so the chain keeps going
+ **/
+func hookRootPost(ctx: *Context) -> int32 {
+    // Announce the hook
+    println("root postRun")
+
+    // Keep the chain going
+    return 0
+}
+
+/**
+ * hookRootPpost
+ * Prints the root persistentPostRun line, the last hook in the chain
+ * @param ctx {*Context} - the run context nova hands to the hook
+ * @return int32 - 0, the chain is over anyway
+ **/
+func hookRootPpost(ctx: *Context) -> int32 {
+    // Announce the hook
+    println("root persistentPostRun")
+
+    // Nothing is left to stop
+    return 0
+}
+
+/**
+ * hookOkPre
+ * Prints the preRun line for the ok command
+ * @param ctx {*Context} - the run context nova hands to the hook
+ * @return int32 - 0 so the chain keeps going
+ **/
+func hookOkPre(ctx: *Context) -> int32 {
+    // Announce the hook
+    println("ok preRun")
+
+    // Keep the chain going
+    return 0
+}
+
+/**
+ * hookOkRun
+ * Prints the run line for the ok command
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - 0 so the chain keeps going
+ **/
+func hookOkRun(ctx: *Context) -> int32 {
+    // Announce the handler
+    println("ok run")
+
+    // Keep the chain going
+    return 0
+}
+
+/**
+ * hookOkPost
+ * Prints the postRun line for the ok command
+ * @param ctx {*Context} - the run context nova hands to the hook
+ * @return int32 - 0 so the chain keeps going
+ **/
+func hookOkPost(ctx: *Context) -> int32 {
+    // Announce the hook
+    println("ok postRun")
+
+    // Keep the chain going
+    return 0
+}
+
+/**
+ * hookFailPre
+ * Prints the preRun line for the fail command, which still runs before the failing handler
+ * @param ctx {*Context} - the run context nova hands to the hook
+ * @return int32 - 0 so the chain keeps going
+ **/
+func hookFailPre(ctx: *Context) -> int32 {
+    // Announce the hook
+    println("fail preRun")
+
+    // Keep the chain going
+    return 0
+}
+
+/**
+ * hookFailRun
+ * Prints the run line for the fail command and returns 3, so postRun and persistentPostRun never run
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - 3, which stops the chain and becomes the exit code
+ **/
+func hookFailRun(ctx: *Context) -> int32 {
+    // Announce the handler
+    println("fail run")
+
+    // Stop the chain here and hand 3 back as the exit code
+    return 3
+}
+
+/**
+ * hookFailPost
+ * Prints the postRun line for the fail command, which the failing handler keeps from ever running
+ * @param ctx {*Context} - the run context nova hands to the hook
+ * @return int32 - 0, never reached in practice
+ **/
+func hookFailPost(ctx: *Context) -> int32 {
+    // Announce the hook
+    println("fail postRun")
+
+    // Keep the chain going
+    return 0
+}
+
+/**
+ * hookOwnPpre
+ * Prints the persistentPreRun the own command declares for itself, which shadows the root's
+ * @param ctx {*Context} - the run context nova hands to the hook
+ * @return int32 - 0 so the chain keeps going
+ **/
+func hookOwnPpre(ctx: *Context) -> int32 {
+    // Announce the hook, the root persistentPreRun is skipped because this one is nearer
+    println("own persistentPreRun")
+
+    // Keep the chain going
+    return 0
+}
+
+/**
+ * hookOwnRun
+ * Prints the run line for the own command
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - 0 so the chain keeps going
+ **/
+func hookOwnRun(ctx: *Context) -> int32 {
+    // Announce the handler, own has no persistentPostRun so the root's still runs after it
+    println("own run")
+
+    // Keep the chain going
+    return 0
+}
+
+/**
+ * hookEchoRun
+ * Prints every token the echo command received, dashes and -- included, because flag parsing is off
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - 0, echoing cannot fail
+ **/
+func hookEchoRun(ctx: *Context) -> int32 {
+    // The number of tokens that reached the handler as positional arguments
+    n: int64 = ctx.nargs()
+
+    // Index of the current token
+    mut i: int64 = 0
+
+    // Loop iterating through the tokens
+    while i < n {
+        // The current token, still exactly as it was typed
+        tok: string = ctx.arg(i)
+
+        // Print the token
+        println("arg: " + tok)
+
+        // Move to the next token
+        i = i + 1
+    }
+
+    // Print how many tokens there were
+    println("count: {}", n)
+
+    // Echoing cannot fail
+    return 0
+}
+
+/**
+ * okCmd
+ * Builds the ok command, the one that runs every hook in the chain
+ * @return *Command - the ok subcommand
+ **/
+func okCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("ok", "Run every hook in order")
+
+    // ok takes no positional arguments
+    c.setArgs(argsNone())
+
+    // The hook that runs just before the handler
+    c.setPreRun(hookOkPre)
+
+    // The handler itself
+    c.setRun(hookOkRun)
+
+    // The hook that runs just after the handler
+    c.setPostRun(hookOkPost)
+
+    // Hand the finished command back to the caller
+    return c
+}
+
+/**
+ * failCmd
+ * Builds the fail command, whose handler returns 3 and cuts the chain short
+ * @return *Command - the fail subcommand
+ **/
+func failCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("fail", "Stop the chain with exit code 3")
+
+    // fail takes no positional arguments
+    c.setArgs(argsNone())
+
+    // The hook that runs just before the handler
+    c.setPreRun(hookFailPre)
+
+    // The handler that returns 3
+    c.setRun(hookFailRun)
+
+    // Registered on purpose, to show that it never runs
+    c.setPostRun(hookFailPost)
+
+    // Hand the finished command back to the caller
+    return c
+}
+
+/**
+ * ownCmd
+ * Builds the own command, which declares its own persistentPreRun and inherits the root's persistentPostRun
+ * @return *Command - the own subcommand
+ **/
+func ownCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("own", "Shadow the root persistentPreRun")
+
+    // own takes no positional arguments
+    c.setArgs(argsNone())
+
+    // The nearer persistentPreRun, which shadows the root's
+    c.setPersistentPreRun(hookOwnPpre)
+
+    // The handler itself
+    c.setRun(hookOwnRun)
+
+    // Hand the finished command back to the caller
+    return c
+}
+
+/**
+ * echoCmd
+ * Builds the echo command, which turns flag parsing off so raw tokens reach the handler
+ * @return *Command - the echo subcommand
+ **/
+func echoCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("echo", "Echo raw tokens, no flag parsing")
+
+    // Any number of positional arguments is fine
+    c.setArgs(argsAny())
+
+    // Every remaining token reaches the handler untouched, dashes and -- and all
+    c.setDisableFlagParsing(true)
+
+    // The handler that prints them back
+    c.setRun(hookEchoRun)
+
+    // Hand the finished command back to the caller
+    return c
+}
+
+/**
+ * hooksCmd
+ * Builds the root command with the full set of hooks and the four demonstration subcommands
+ * @return *Command - the root command, ready for novaExecute
+ **/
+func hooksCmd() -> *Command {
+    // The root command, name and one line description
+    c: *Command = cmdNew("hooks", "Demonstrate nova hook ordering")
+
+    // The long description shown by hooks --help
+    c.setLong("hooks prints one line per hook so the ordering is visible.\n\nRun `hooks ok`, `hooks fail`, `hooks own` and `hooks echo -- -x` to see\nthe four interesting cases.")
+
+    // The root itself takes no positional arguments
+    c.setArgs(argsNone())
+
+    // The persistent hook every command in the tree inherits unless it declares its own
+    c.setPersistentPreRun(hookRootPpre)
+
+    // The hooks that only run when the root itself runs
+    c.setPreRun(hookRootPre)
+    c.setRun(hookRootRun)
+    c.setPostRun(hookRootPost)
+
+    // The last hook in the chain, inherited the same way the persistentPreRun is
+    c.setPersistentPostRun(hookRootPpost)
+
+    // The four cases worth looking at
+    c.addCommand(okCmd())
+    c.addCommand(failCmd())
+    c.addCommand(ownCmd())
+    c.addCommand(echoCmd())
+
+    // Hand the finished tree back to the caller
+    return c
+}
+
+/**
+ * main
+ * Builds the command tree and hands the command line to nova
+ * @param argc {int32} - the argument count, unused here
+ * @param argv {string[]} - the raw command line, program name first
+ * @return int32 - the exit code novaExecute produced, 3 for the fail command
+ **/
+func main(argc: int32, argv: string[]) -> int32 {
+    // The command tree, a root plus four subcommands
+    root: *Command = hooksCmd()
+
+    // Parse argv against the tree, run the hook chain and return its exit code
+    return novaExecute(root, argv)
+}

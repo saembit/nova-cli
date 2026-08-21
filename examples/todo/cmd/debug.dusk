@@ -1,0 +1,43 @@
+// A hidden command, runnable but never listed in help output.
+@paradigm procedural
+
+// The command type, the run context and the argument rules
+@import nova.command
+@import nova.context
+@import nova.args
+
+/**
+ * runDebug
+ * Prints the full command path nova resolved for this run
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runDebug(ctx: *Context) -> int32 {
+    // The path is the command names from the root down, joined with spaces
+    println("debug: hidden command, path " + ctx.commandPath())
+
+    // Printing cannot fail
+    return 0
+}
+
+/**
+ * debugCmd
+ * Builds the debug command, which works normally but stays out of the help listing
+ * @return *Command - the debug subcommand
+ **/
+export func debugCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("debug", "Print internal state")
+
+    // Keep it out of the help listing while leaving it runnable
+    c.setHidden(true)
+
+    // debug takes no positional arguments
+    c.setArgs(argsNone())
+
+    // The handler
+    c.setRun(runDebug)
+
+    // Hand the finished command back to the caller
+    return c
+}

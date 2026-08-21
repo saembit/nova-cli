@@ -1,0 +1,333 @@
+/**
+ * nova/context.dusk
+ * What a handler receives, a Context names the command that runs, the root, the chain of commands from the root down to it, the positional args left after flag parsing and the raw argv
+ * Flag getters resolve a name against the command's local flags, then its persistent flags, then each ancestor's persistent flags nearest first, asking for a flag no command on the chain declares aborts with "fatal: nova: ..."
+ **/
+@paradigm oop
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import flagset
+@import text
+@import command
+@import help
+
+/**
+ * Context
+ * The handler's view of one invocation, built by novaExecute and borrowed by every hook, never freed
+ **/
+export struct Context {
+    cmd: *Command,
+    root: *Command,
+    chain: *Vector<*Command>,
+    args: *Vector<string>,
+    argv: string[],
+}
+
+/**
+ * ctxFindIn
+ * Runs find or findShort on one set by the byShort switch
+ * @param fset {*FlagSet} - the set
+ * @param key {string} - the long name or the shorthand
+ * @param byShort {bool} - true to look up by shorthand
+ * @return the index or -1
+ **/
+func ctxFindIn(fset: *FlagSet, key: string, byShort: bool) -> int64 {
+    // Look up by shorthand when asked
+    if byShort {
+        return fset.findShort(key)
+    }
+
+    // Look up by long name
+    return fset.find(key)
+}
+
+/**
+ * ctxLookupAny
+ * The shared walk behind ctxLookupChain and ctxLookupShortChain, the leaf's local flags then the persistent flags of every chain entry from the leaf up to the root
+ * @param chain {*Vector<*Command>} - the commands root..cmd, borrowed
+ * @param key {string} - the long name or the shorthand
+ * @param byShort {bool} - true to look up by shorthand
+ * @return (set, index, found), when not found the set is the leaf's flags and the index -1
+ **/
+func ctxLookupAny(chain: *Vector<*Command>, key: string, byShort: bool) -> (*FlagSet, int64, bool) {
+    // The chain length
+    n: int64 = vec_len(chain)
+
+    // The leaf command
+    leaf: *Command = vec_get(chain, n - 1)
+
+    // The leaf's local flags
+    localf: *FlagSet = (*leaf).flags
+
+    // Look in the local flags first
+    li: int64 = ctxFindIn(localf, key, byShort)
+    if li >= 0 {
+        return (localf, li, true)
+    }
+
+    // Walk the chain from the leaf up to the root
+    mut k: int64 = n - 1
+    while k >= 0 {
+        // The current command
+        c: *Command = vec_get(chain, k)
+
+        // Its persistent flags
+        pf: *FlagSet = (*c).pflags
+
+        // Return on the first match
+        pi: int64 = ctxFindIn(pf, key, byShort)
+        if pi >= 0 {
+            return (pf, pi, true)
+        }
+        k = k - 1
+    }
+
+    // Not found
+    return (localf, -1, false)
+}
+
+/**
+ * ctxLookupChain
+ * Resolves a long flag name against a chain root..cmd, the last command's local flags, then its persistent flags, then each ancestor's persistent flags nearest first, "help" is never stored as a flag so it is never found
+ * @param chain {*Vector<*Command>} - the commands root..cmd, borrowed
+ * @param name {string} - the long name without dashes
+ * @return (set, index, found), when not found the set is cmd.flags and the index -1
+ **/
+export func ctxLookupChain(chain: *Vector<*Command>, name: string) -> (*FlagSet, int64, bool) {
+    // Walk by long name
+    return ctxLookupAny(chain, name, false)
+}
+
+/**
+ * ctxLookupShortChain
+ * Resolves a one character shorthand along a chain the way ctxLookupChain resolves a long name, then re-resolves the long name of the flag it found so a flag nearer the leaf under the same long name wins
+ * @param chain {*Vector<*Command>} - the commands root..cmd, borrowed
+ * @param short {string} - the shorthand, one character
+ * @return (set, index, found), when not found the set is cmd.flags and the index -1
+ **/
+export func ctxLookupShortChain(chain: *Vector<*Command>, short: string) -> (*FlagSet, int64, bool) {
+    // Walk by shorthand
+    fset, i, found := ctxLookupAny(chain, short, true)
+
+    // Nothing carries the shorthand
+    if !found {
+        return (fset, i, found)
+    }
+
+    // The flag that carries it
+    f: *Flag = fset.get(i)
+
+    // Walk again by its long name
+    return ctxLookupAny(chain, (*f).name, false)
+}
+
+/**
+ * ctxLookup
+ * Resolves a long flag name for a context, cmd.flags, cmd.pflags, then the ancestors' pflags nearest first
+ * @param ctx {*Context} - the context
+ * @param name {string} - the long name without dashes
+ * @return (set, index, found)
+ **/
+export func ctxLookup(ctx: *Context, name: string) -> (*FlagSet, int64, bool) {
+    // The chain of the context
+    chain: *Vector<*Command> = (*ctx).chain
+
+    // Walk the chain
+    return ctxLookupChain(chain, name)
+}
+
+/**
+ * ctxRequire
+ * Gives the set holding name on a chain, aborts with a fatal message when no command on it declares the flag
+ * @param chain {*Vector<*Command>} - the commands root..cmd, borrowed
+ * @param name {string} - the long name without dashes
+ * @return the set
+ **/
+func ctxRequire(chain: *Vector<*Command>, name: string) -> *FlagSet {
+    // Walk the chain
+    fset, i, found := ctxLookupChain(chain, name)
+
+    // A missing flag is a fault
+    if !found || i < 0 {
+        novaFault("no flag named '--", name, "'")
+    }
+
+    // Return the set
+    return fset
+}
+
+impl Context {
+    /**
+     * nargs
+     * Gives the number of positional args
+     * @return the count
+     **/
+    func nargs() -> int64 {
+        // The arg vector
+        a: *Vector<string> = self.args
+
+        // Return the length
+        return vec_len(a)
+    }
+
+    /**
+     * arg
+     * Gives the positional arg at index i, aborts when out of range
+     * @param i {int64} - the index
+     * @return the arg
+     **/
+    func arg(i: int64) -> string {
+        // The arg vector
+        a: *Vector<string> = self.args
+
+        // Return the arg at i
+        return vec_get(a, i)
+    }
+
+    /**
+     * getBool
+     * Gives the value of the bool flag name as resolved along the chain
+     * @param name {string} - the long name
+     * @return the value
+     **/
+    func getBool(name: string) -> bool {
+        // The chain
+        chain: *Vector<*Command> = self.chain
+
+        // The set that holds the flag
+        fset: *FlagSet = ctxRequire(chain, name)
+
+        // Return the value from the set
+        return fset.getBool(name)
+    }
+
+    /**
+     * getStr
+     * Gives the value of the string flag name as resolved along the chain
+     * @param name {string} - the long name
+     * @return the value
+     **/
+    func getStr(name: string) -> string {
+        // The chain
+        chain: *Vector<*Command> = self.chain
+
+        // The set that holds the flag
+        fset: *FlagSet = ctxRequire(chain, name)
+
+        // Return the value from the set
+        return fset.getStr(name)
+    }
+
+    /**
+     * getInt
+     * Gives the value of the int flag name as resolved along the chain
+     * @param name {string} - the long name
+     * @return the value
+     **/
+    func getInt(name: string) -> int64 {
+        // The chain
+        chain: *Vector<*Command> = self.chain
+
+        // The set that holds the flag
+        fset: *FlagSet = ctxRequire(chain, name)
+
+        // Return the value from the set
+        return fset.getInt(name)
+    }
+
+    /**
+     * changed
+     * Checks if name was set on the command line
+     * @param name {string} - the long name
+     * @return true when set
+     **/
+    func changed(name: string) -> bool {
+        // The chain
+        chain: *Vector<*Command> = self.chain
+
+        // The set that holds the flag
+        fset: *FlagSet = ctxRequire(chain, name)
+
+        // Return the changed bit from the set
+        return fset.changed(name)
+    }
+
+    /**
+     * commandPath
+     * Gives the full path of the running command, such as "app serve"
+     * @return the path
+     **/
+    func commandPath() -> string {
+        // The running command
+        c: *Command = self.cmd
+
+        // Return its path
+        return (*c).path
+    }
+
+    /**
+     * printHelp
+     * Prints the running command's help to stdout
+     * @return nothing
+     **/
+    func printHelp() -> void {
+        // The running command and the chain
+        c: *Command = self.cmd
+        chain: *Vector<*Command> = self.chain
+
+        // Print the help
+        helpPrint(c, chain)
+    }
+
+    /**
+     * printUsage
+     * Prints the running command's usage block to stderr
+     * @return nothing
+     **/
+    func printUsage() -> void {
+        // The running command and the chain
+        c: *Command = self.cmd
+        chain: *Vector<*Command> = self.chain
+
+        // Print the usage
+        usagePrint(c, chain)
+    }
+
+    /**
+     * fail
+     * Reports an error the Cobra way, "Error: <msg>" on stderr and the "Run '<path> --help' for usage." hint unless the command silences usage
+     * @param msg {string} - the message, borrowed
+     * @return 1, the exit code to hand back
+     **/
+    func fail(msg: string) -> int32 {
+        // The running command
+        c: *Command = self.cmd
+
+        // Report against it
+        return ctxReportError(c, msg)
+    }
+}
+
+/**
+ * ctxReportError
+ * Prints "Error: <msg>" to stderr unless cmd.silenceErrors and then the hint "Run '<path> --help' for usage." unless cmd.silenceUsage
+ * @param target {*Command} - the command the error belongs to
+ * @param msg {string} - the message, borrowed
+ * @return 1
+ **/
+export func ctxReportError(target: *Command, msg: string) -> int32 {
+    // Print the error line unless silenced
+    if !(*target).silenceErrors {
+        printerr("Error: " + msg)
+    }
+
+    // Print the usage hint unless silenced
+    if !(*target).silenceUsage {
+        printerr("Run '" + (*target).path + " --help' for usage.")
+    }
+
+    // Return the exit code
+    return 1
+}

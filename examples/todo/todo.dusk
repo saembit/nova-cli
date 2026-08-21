@@ -1,0 +1,29 @@
+// todo is a multi command nova application laid out the way nova-cli init
+// generates one, a thin root file that only wires the command tree together and
+// one file per command under cmd/.
+//
+// Nothing is persisted, every command prints what it would have done so the
+// golden tests stay deterministic.
+@paradigm procedural
+
+// The command type and the executor
+@import nova.command
+@import nova.exec
+
+// The root command, which pulls in every command under cmd/
+@import cmd.root
+
+/**
+ * main
+ * Builds the command tree and hands the command line to nova
+ * @param argc {int32} - the argument count, unused here
+ * @param argv {string[]} - the raw command line, program name first
+ * @return int32 - the exit code novaExecute produced
+ **/
+func main(argc: int32, argv: string[]) -> int32 {
+    // The whole command tree, built in cmd/root.dusk
+    root: *Command = rootCmd()
+
+    // Parse argv against the tree, run the matching command and return its exit code
+    return novaExecute(root, argv)
+}

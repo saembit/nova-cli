@@ -1,0 +1,49 @@
+// The root command. It is deliberately not runnable, so plain todo prints its
+// help and todo bogus is an unknown command error.
+@paradigm procedural
+
+// The command type, the run context and the flag sets
+@import nova.command
+@import nova.context
+@import nova.flagset
+
+// One import per command file under cmd/
+@import add
+@import list
+@import done
+@import config
+@import debug
+@import old
+
+/**
+ * rootCmd
+ * Builds the todo root command and hangs every subcommand off it
+ * @return *Command - the root command, ready for novaExecute
+ **/
+export func rootCmd() -> *Command {
+    // The root command, name and one line description
+    c: *Command = cmdNew("todo", "A tiny todo list manager")
+
+    // The long description shown by todo --help
+    c.setLong("todo keeps a list of things to do.\n\nIt is a nova demo application: nothing is persisted, every command\nprints what it would have done.")
+
+    // The example block printed under the long description
+    c.setExample("  todo add buy milk\n  todo list --all\n  todo done 2 --by alice")
+
+    // The version reported by todo --version
+    c.setVersion("1.2.3")
+
+    // A persistent flag, so every subcommand in the tree sees --verbose
+    c.persistentFlags().addBool("verbose", "v", false, "verbose output")
+
+    // The six subcommands, two of which stay out of the help listing
+    c.addCommand(addCmd())
+    c.addCommand(listCmd())
+    c.addCommand(doneCmd())
+    c.addCommand(configCmd())
+    c.addCommand(debugCmd())
+    c.addCommand(oldCmd())
+
+    // Hand the finished tree back to the caller
+    return c
+}

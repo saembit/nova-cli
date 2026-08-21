@@ -1,0 +1,81 @@
+== flagset ==
+len 4
+find verbose 0 name 1 port 2 config 3 nope -1
+findShort v 0 n 1 p 2 x -1 empty -1
+has port true has nope false
+defaults verbose=false name=world port=8080 config=[]
+changed before: false false false
+get(2) name=port short=p kind=int help=port to listen on defI=8080
+kind words: bool=[] str=[string] int=[int]
+kind_eq bool/bool true bool/int false
+set bool false: ok
+verbose=false changed=true
+set bool YES: ok
+verbose=true
+set bool maybe: err: invalid argument "maybe" for "--verbose" flag: expected a boolean
+set str: ok
+name=dusk changed=true
+set int: ok
+port=9090 changed=true
+set int neg: ok
+port=-5
+set int bad: err: invalid argument "abc" for "--port" flag: expected an integer
+port after bad=-5
+after reset verbose=false name=world port=8080
+changed after reset: false false false
+setBoolOn verbose=true changed=true
+marks required=true hidden=true deprecated=[use --listen instead]
+unmarked required=false hidden=false deprecated=[]
+== bool parse ==
+parse_bool true -> true
+parse_bool True -> true
+parse_bool 1 -> true
+parse_bool t -> true
+parse_bool yes -> true
+parse_bool Y -> true
+parse_bool false -> false
+parse_bool FALSE -> false
+parse_bool 0 -> false
+parse_bool F -> false
+parse_bool no -> false
+parse_bool n -> false
+parse_bool  -> err: expected a boolean
+parse_bool 2 -> err: expected a boolean
+parse_bool yep -> err: expected a boolean
+== args ==
+any 0: ok
+any 5: ok
+none 0: ok
+none 1: err: unknown command "" for "app"
+none first: err: unknown command "x" for "app"
+exact 2/2: ok
+exact 2/1: err: accepts 2 arg(s), received 1
+exact 2/3: err: accepts 2 arg(s), received 3
+min 1/1: ok
+min 1/0: err: requires at least 1 arg(s), only received 0
+max 1/1: ok
+max 1/2: err: accepts at most 1 arg(s), received 2
+range 1-3/2: ok
+range 1-3/0: err: accepts between 1 and 3 arg(s), received 0
+range 1-3/4: err: accepts between 1 and 3 arg(s), received 4
+== text ==
+pad [ab   ]
+pad same [abcde]
+pad longer [abcdefg]
+pad empty [   ]
+bool true false
+quote "hi"
+join empty []
+join one ["a"]
+join three ["a", "b", "c"]
+is_long_flag --name true -- false -n false --x true name false
+is_short_flag -n true -abc true - false -- false -5 false --n false n false
+split_eq [name=value] -> [name] [value] true
+split_eq [name] -> [name] [] false
+split_eq [a=b=c] -> [a] [b=c] true
+split_eq [=v] -> [] [v] true
+split_eq [k=] -> [k] [] true
+is_digit 0 true 9 true a false
+char_at [a] [c]
+is_one_char a true ab false empty false
+done

@@ -1,0 +1,543 @@
+/**
+ * nova/command.dusk
+ * The Command tree, a Command carries its use line, help text, local and persistent flags, children, hooks and the positional arg validator, novaExecute walks the tree argv describes and dispatches to the handlers
+ * Commands are heap values built by cmdNew and linked with addCommand, the tree lives for the whole process and is never freed, a duplicate child name aborts with "fatal: nova: ..." on stderr
+ **/
+@paradigm oop
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import flagset
+@import args
+@import text
+@import context
+
+/**
+ * Command
+ * One node of the CLI tree, every string is borrowed from a caller literal or argv, a command with no handler holds cmdNoop and the matching has flag is false
+ **/
+export struct Command {
+    use: string,
+    name: string,
+    short: string,
+    long: string,
+    example: string,
+    version: string,
+    aliases: *Vector<string>,
+    hidden: bool,
+    deprecated: string,
+    flags: *FlagSet,
+    pflags: *FlagSet,
+    kids: *Vector<*Command>,
+    path: string,
+    args: ArgSpec,
+    validArgs: *Vector<string>,
+    hasRun: bool,
+    run: (*Context) -> int32,
+    hasPre: bool,
+    preRun: (*Context) -> int32,
+    hasPost: bool,
+    postRun: (*Context) -> int32,
+    hasPpre: bool,
+    persistentPreRun: (*Context) -> int32,
+    hasPpost: bool,
+    persistentPostRun: (*Context) -> int32,
+    silenceUsage: bool,
+    silenceErrors: bool,
+    disableHelpCmd: bool,
+    disableCompletionCmd: bool,
+    disableFlagParsing: bool,
+    isBuiltin: bool,
+}
+
+/**
+ * cmdNoop
+ * The placeholder handler every unset hook field holds
+ * @param ctx {*Context} - ignored
+ * @return 0
+ **/
+export func cmdNoop(ctx: *Context) -> int32 {
+    // Return success
+    return 0
+}
+
+/**
+ * cmdNameOf
+ * Gives the first word of a use line, "serve [flags]" gives "serve"
+ * @param use {string} - the use line, borrowed
+ * @return a fresh heap string holding the name
+ **/
+export func cmdNameOf(use: string) -> string {
+    // The index of the first space or -1
+    sp: int64 = str_find(use, " ")
+
+    // No space so the whole line is the name
+    if sp < 0 {
+        return substring(use, 0, str_len(use))
+    }
+
+    // Return the text before the space
+    return substring(use, 0, sp)
+}
+
+/**
+ * cmdNew
+ * Makes a command from a use line and a short description, the name is the first word of use, the path starts as the name and every hook is unset
+ * @param use {string} - the use line, such as "serve [flags]"
+ * @param short {string} - the one line description shown in command lists
+ * @return a pointer to the new command
+ **/
+export func cmdNew(use: string, short: string) -> *Command {
+    // The empty alias, child and valid arg vectors
+    aliases: *Vector<string> = alloc(vec_new())
+    kids: *Vector<*Command> = alloc(vec_new())
+    valid: *Vector<string> = alloc(vec_new())
+
+    // The name from the use line
+    name: string = cmdNameOf(use)
+
+    // Return the new command with every hook unset
+    return alloc(Command {
+        use: use, name: name, short: short, long: "", example: "", version: "",
+        aliases: aliases, hidden: false, deprecated: "",
+        flags: flagsetNew(), pflags: flagsetNew(), kids: kids,
+        path: name, args: argsAny(), validArgs: valid,
+        hasRun: false, run: cmdNoop,
+        hasPre: false, preRun: cmdNoop,
+        hasPost: false, postRun: cmdNoop,
+        hasPpre: false, persistentPreRun: cmdNoop,
+        hasPpost: false, persistentPostRun: cmdNoop,
+        silenceUsage: false, silenceErrors: false,
+        disableHelpCmd: false, disableCompletionCmd: false,
+        disableFlagParsing: false, isBuiltin: false,
+    })
+}
+
+/**
+ * cmdCmpByName
+ * Orders two commands by name, a vec_sort comparator
+ * @param a {*Command} - the first command
+ * @param b {*Command} - the second command
+ * @return negative, zero or positive as a's name sorts before, with or after b's
+ **/
+export func cmdCmpByName(a: *Command, b: *Command) -> int32 {
+    // Compare the names
+    return str_cmp((*a).name, (*b).name)
+}
+
+/**
+ * cmdVisibleKids
+ * Gives the children of c that help and completion show, neither hidden nor deprecated, sorted by name
+ * @param c {*Command} - the parent command
+ * @return a fresh vector of borrowed children, the caller may free the vector
+ **/
+export func cmdVisibleKids(c: *Command) -> *Vector<*Command> {
+    // The child vector
+    kids: *Vector<*Command> = (*c).kids
+
+    // The vector of shown children
+    shown: *Vector<*Command> = alloc(vec_new())
+
+    // Loop over the children
+    mut i: int64 = 0
+    while i < vec_len(kids) {
+        // The current child
+        k: *Command = vec_get(kids, i)
+
+        // Keep it when neither hidden nor deprecated
+        if !(*k).hidden && (*k).deprecated == "" {
+            vec_push(shown, k)
+        }
+        i = i + 1
+    }
+
+    // Sort the shown children by name
+    vec_sort(shown, cmdCmpByName)
+
+    // Return the sorted vector
+    return shown
+}
+
+/**
+ * cmdMatches
+ * Checks if word is the command's name or one of its aliases
+ * @param c {*Command} - the command
+ * @param word {string} - the candidate, borrowed
+ * @return true on a match
+ **/
+export func cmdMatches(c: *Command, word: string) -> bool {
+    // Check the name first
+    if (*c).name == word {
+        return true
+    }
+
+    // The alias vector
+    aliases: *Vector<string> = (*c).aliases
+
+    // Loop over the aliases
+    mut i: int64 = 0
+    while i < vec_len(aliases) {
+        // Return on an alias match
+        if vec_get(aliases, i) == word {
+            return true
+        }
+        i = i + 1
+    }
+
+    // No match
+    return false
+}
+
+impl Command {
+    /**
+     * setLong
+     * Sets the long description shown at the top of help
+     * @param s {string} - the text
+     * @return nothing
+     **/
+    func setLong(s: string) -> void {
+        // Store the text
+        self.long = s
+    }
+
+    /**
+     * setExample
+     * Sets the examples block shown verbatim under "Examples:"
+     * @param s {string} - the text
+     * @return nothing
+     **/
+    func setExample(s: string) -> void {
+        // Store the text
+        self.example = s
+    }
+
+    /**
+     * setVersion
+     * Sets the version string, non empty on the root enables --version
+     * @param s {string} - the version
+     * @return nothing
+     **/
+    func setVersion(s: string) -> void {
+        // Store the version
+        self.version = s
+    }
+
+    /**
+     * setHidden
+     * Hides the command from command lists, it still runs
+     * @param b {bool} - true to hide
+     * @return nothing
+     **/
+    func setHidden(b: bool) -> void {
+        // Store the bit
+        self.hidden = b
+    }
+
+    /**
+     * setDeprecated
+     * Marks the command deprecated, msg is shown on stderr when it runs
+     * @param msg {string} - the message
+     * @return nothing
+     **/
+    func setDeprecated(msg: string) -> void {
+        // Store the message
+        self.deprecated = msg
+    }
+
+    /**
+     * setArgs
+     * Sets the positional argument validator
+     * @param spec {ArgSpec} - the validator
+     * @return nothing
+     **/
+    func setArgs(spec: ArgSpec) -> void {
+        // Store the spec
+        self.args = spec
+    }
+
+    /**
+     * addAlias
+     * Adds an alternative name the command also answers to
+     * @param a {string} - the alias
+     * @return nothing
+     **/
+    func addAlias(a: string) -> void {
+        // The alias vector
+        aliases: *Vector<string> = self.aliases
+
+        // Push the alias
+        vec_push(aliases, a)
+    }
+
+    /**
+     * addValidArg
+     * Adds a word to the list of valid positional args used by completion and docs
+     * @param a {string} - the word
+     * @return nothing
+     **/
+    func addValidArg(a: string) -> void {
+        // The valid arg vector
+        valid: *Vector<string> = self.validArgs
+
+        // Push the word
+        vec_push(valid, a)
+    }
+
+    /**
+     * setRun
+     * Sets the handler and makes the command runnable
+     * @param f {(*Context) -> int32} - the handler
+     * @return nothing
+     **/
+    func setRun(f: (*Context) -> int32) -> void {
+        // Store the handler and mark it set
+        self.run = f
+        self.hasRun = true
+    }
+
+    /**
+     * setPreRun
+     * Sets the hook that runs just before run
+     * @param f {(*Context) -> int32} - the hook
+     * @return nothing
+     **/
+    func setPreRun(f: (*Context) -> int32) -> void {
+        // Store the hook and mark it set
+        self.preRun = f
+        self.hasPre = true
+    }
+
+    /**
+     * setPostRun
+     * Sets the hook that runs just after run
+     * @param f {(*Context) -> int32} - the hook
+     * @return nothing
+     **/
+    func setPostRun(f: (*Context) -> int32) -> void {
+        // Store the hook and mark it set
+        self.postRun = f
+        self.hasPost = true
+    }
+
+    /**
+     * setPersistentPreRun
+     * Sets the hook descendants inherit, it runs before preRun
+     * @param f {(*Context) -> int32} - the hook
+     * @return nothing
+     **/
+    func setPersistentPreRun(f: (*Context) -> int32) -> void {
+        // Store the hook and mark it set
+        self.persistentPreRun = f
+        self.hasPpre = true
+    }
+
+    /**
+     * setPersistentPostRun
+     * Sets the hook descendants inherit, it runs after postRun
+     * @param f {(*Context) -> int32} - the hook
+     * @return nothing
+     **/
+    func setPersistentPostRun(f: (*Context) -> int32) -> void {
+        // Store the hook and mark it set
+        self.persistentPostRun = f
+        self.hasPpost = true
+    }
+
+    /**
+     * setSilenceUsage
+     * When true no "Run ... --help" hint follows an error
+     * @param b {bool} - the setting
+     * @return nothing
+     **/
+    func setSilenceUsage(b: bool) -> void {
+        // Store the bit
+        self.silenceUsage = b
+    }
+
+    /**
+     * setSilenceErrors
+     * When true the executor does not print "Error: ..." itself
+     * @param b {bool} - the setting
+     * @return nothing
+     **/
+    func setSilenceErrors(b: bool) -> void {
+        // Store the bit
+        self.silenceErrors = b
+    }
+
+    /**
+     * setDisableHelpCmd
+     * When true the builtin help command is not added to the root
+     * @param b {bool} - the setting
+     * @return nothing
+     **/
+    func setDisableHelpCmd(b: bool) -> void {
+        // Store the bit
+        self.disableHelpCmd = b
+    }
+
+    /**
+     * setDisableCompletionCmd
+     * When true the builtin completion command is not added to the root
+     * @param b {bool} - the setting
+     * @return nothing
+     **/
+    func setDisableCompletionCmd(b: bool) -> void {
+        // Store the bit
+        self.disableCompletionCmd = b
+    }
+
+    /**
+     * setDisableFlagParsing
+     * When true every token after the command is a positional arg
+     * @param b {bool} - the setting
+     * @return nothing
+     **/
+    func setDisableFlagParsing(b: bool) -> void {
+        // Store the bit
+        self.disableFlagParsing = b
+    }
+
+    /**
+     * localFlags
+     * Gives the command's own flags, not the inherited ones
+     * @return the local flag set
+     **/
+    func localFlags() -> *FlagSet {
+        // Return the local set
+        return self.flags
+    }
+
+    /**
+     * persistentFlags
+     * Gives the flags this command and every descendant accept
+     * @return the persistent flag set
+     **/
+    func persistentFlags() -> *FlagSet {
+        // Return the persistent set
+        return self.pflags
+    }
+
+    /**
+     * numChildren
+     * Gives the number of direct children, hidden ones included
+     * @return the count
+     **/
+    func numChildren() -> int64 {
+        // The child vector
+        kids: *Vector<*Command> = self.kids
+
+        // Return the length
+        return vec_len(kids)
+    }
+
+    /**
+     * child
+     * Gives the child at index i, aborts when out of range
+     * @param i {int64} - the index
+     * @return the child
+     **/
+    func child(i: int64) -> *Command {
+        // The child vector
+        kids: *Vector<*Command> = self.kids
+
+        // Return the child at i
+        return vec_get(kids, i)
+    }
+
+    /**
+     * findChild
+     * Finds the index of the child whose name or alias is name
+     * @param name {string} - the word to match
+     * @return the index or -1
+     **/
+    func findChild(name: string) -> int64 {
+        // The child vector
+        kids: *Vector<*Command> = self.kids
+
+        // Loop over the children
+        mut i: int64 = 0
+        while i < vec_len(kids) {
+            // Return the index on a name or alias match
+            if cmdMatches(vec_get(kids, i), name) {
+                return i
+            }
+            i = i + 1
+        }
+
+        // Not found
+        return -1
+    }
+
+    /**
+     * addCommand
+     * Adds a child, aborts when the child's name or an alias is already taken by an existing child
+     * @param child {*Command} - the child to add
+     * @return nothing
+     **/
+    func addCommand(child: *Command) -> void {
+        // A taken name is a fault
+        if self.findChild((*child).name) >= 0 {
+            novaFault("command '", (*child).name, "' already added")
+        }
+
+        // The child's alias vector
+        aliases: *Vector<string> = (*child).aliases
+
+        // Loop over the aliases
+        mut i: int64 = 0
+        while i < vec_len(aliases) {
+            // The current alias
+            a: string = vec_get(aliases, i)
+
+            // A taken alias is a fault
+            if self.findChild(a) >= 0 {
+                novaFault("alias '", a, "' already used by another command")
+            }
+            i = i + 1
+        }
+
+        // The child vector
+        kids: *Vector<*Command> = self.kids
+
+        // Push the child
+        vec_push(kids, child)
+    }
+
+    /**
+     * hasSubcommands
+     * Checks if any child is shown in help, not hidden and not deprecated
+     * @return true when one is shown
+     **/
+    func hasSubcommands() -> bool {
+        // The child vector
+        kids: *Vector<*Command> = self.kids
+
+        // Loop over the children
+        mut i: int64 = 0
+        while i < vec_len(kids) {
+            // The current child
+            k: *Command = vec_get(kids, i)
+
+            // Return on the first shown child
+            if !(*k).hidden && (*k).deprecated == "" {
+                return true
+            }
+            i = i + 1
+        }
+
+        // None shown
+        return false
+    }
+
+    /**
+     * isRunnable
+     * Checks if the command has a run handler
+     * @return true when set
+     **/
+    func isRunnable() -> bool {
+        // Return the has run bit
+        return self.hasRun
+    }
+}

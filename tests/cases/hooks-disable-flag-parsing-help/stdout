@@ -1,0 +1,4 @@
+root persistentPreRun
+arg: -h
+count: 1
+root persistentPostRun

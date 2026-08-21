@@ -1,0 +1,9 @@
+# build output (dusk writes ./target/dusk-out, dawn ./target/dawn-out, under any cwd)
+target/
+# dawn checkouts; dawn.lock reproduces them. The root package has no @require,
+# so a lock here is an artifact of running dawn inside the repo.
+dawn_modules/
+/dawn.lock
+# notes: only README.md is tracked
+*.md
+!README.md

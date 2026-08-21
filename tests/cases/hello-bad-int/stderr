@@ -1,0 +1,2 @@
+Error: invalid argument "abc" for "--times" flag: expected an integer
+Run 'hello --help' for usage.

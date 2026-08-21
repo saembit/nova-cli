@@ -1,0 +1,435 @@
+/**
+ * nova/completion.dusk
+ * The builtin completion [bash|zsh] command, it writes a static shell completion script with the command tree baked in
+ **/
+@paradigm oop
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import flagset
+@import args
+@import command
+@import context
+
+// Checks if c is an ASCII letter, digit or underscore
+func completionIsWordChar(c: char) -> bool {
+    // The byte value of the char
+    n: int64 = c
+
+    // Digits
+    if n >= 48 && n <= 57 {
+        return true
+    }
+
+    // Upper case letters
+    if n >= 65 && n <= 90 {
+        return true
+    }
+
+    // Lower case letters
+    if n >= 97 && n <= 122 {
+        return true
+    }
+
+    // Underscore
+    return n == 95
+}
+
+/**
+ * completionIdent
+ * The application name with every character outside [A-Za-z0-9_] replaced by an underscore
+ * @param app {string} - the application name, borrowed
+ * @return a fresh heap string
+ **/
+export func completionIdent(app: string) -> string {
+    // A builder for the ident
+    sb: *StringBuilder = alloc(sb_new())
+
+    // Loop over the chars of the name
+    mut i: int64 = 0
+    while i < str_len(app) {
+        // Keep a word char, replace anything else with an underscore
+        if completionIsWordChar(app[i]) {
+            sb_push_char(sb, app[i])
+        } else {
+            sb_push_char(sb, 95)
+        }
+        i = i + 1
+    }
+
+    // Copy the text out and free the builder
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return out
+}
+
+/**
+ * completionFuncName
+ * The name of the bash function the generated script defines, such as "_todo_completions"
+ * @param app {string} - the application name, borrowed
+ * @return a fresh heap string
+ **/
+export func completionFuncName(app: string) -> string {
+    // The ident of the app and the function name around it
+    id: string = completionIdent(app)
+    out: string = "_" + id + "_completions"
+    free(id)
+    return out
+}
+
+// Appends s to out unless an equal string is already there
+func completionPushUnique(out: *Vector<string>, s: string) -> void {
+    // Loop over the strings collected so far
+    mut i: int64 = 0
+    while i < vec_len(out) {
+        if vec_get(out, i) == s {
+            return
+        }
+        i = i + 1
+    }
+
+    // Not there yet
+    vec_push(out, s)
+}
+
+// Pushes the long names of every visible flag of fset onto out
+func completionCollectFlagNames(out: *Vector<string>, fset: *FlagSet) -> void {
+    // Loop over the flags in the set
+    mut i: int64 = 0
+    while i < fset.len() {
+        f: *Flag = fset.get(i)
+        if !(*f).hidden && (*f).deprecated == "" {
+            completionPushUnique(out, (*f).name)
+        }
+        i = i + 1
+    }
+}
+
+// The case label of a child, "set" under the root, "config set" under "config"
+func completionChildLabel(lbl: string, name: string) -> string {
+    // The root label is empty so the child label is just the name
+    if lbl == "" {
+        return substring(name, 0, str_len(name))
+    }
+    return lbl + " " + name
+}
+
+// Appends one arm of the word table, "<lbl>|<word>") cmd="<child>" ;;
+func completionPushMapArm(sb: *StringBuilder, lbl: string, word: string, child: string) -> void {
+    sb_push(sb, "            \"")
+    sb_push(sb, lbl)
+    sb_push(sb, "|")
+    sb_push(sb, word)
+    sb_push(sb, "\") cmd=\"")
+    sb_push(sb, child)
+    sb_push(sb, "\" ;;\n")
+}
+
+/**
+ * completionPushOptsArm
+ * Appends one arm of the candidate table, the child names, validArgs, -h and every long flag the command accepts
+ * @param sb {*StringBuilder} - the builder for the candidate table
+ * @param c {*Command} - the command
+ * @param lbl {string} - the case label of the command
+ * @param shown {*Vector<*Command>} - the visible children
+ * @param inherited {*Vector<string>} - the long names of the ancestors' persistent flags
+ * @return ...
+ **/
+func completionPushOptsArm(sb: *StringBuilder, c: *Command, lbl: string, shown: *Vector<*Command>, inherited: *Vector<string>) -> void {
+    // The word candidates, the child names first
+    words: *Vector<string> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < vec_len(shown) {
+        k: *Command = vec_get(shown, i)
+        completionPushUnique(words, (*k).name)
+        i = i + 1
+    }
+
+    // Then the validArgs
+    valid: *Vector<string> = (*c).validArgs
+    mut v: int64 = 0
+    while v < vec_len(valid) {
+        completionPushUnique(words, vec_get(valid, v))
+        v = v + 1
+    }
+
+    // The flag names, the inherited ones first
+    names: *Vector<string> = alloc(vec_new())
+    mut j: int64 = 0
+    while j < vec_len(inherited) {
+        completionPushUnique(names, vec_get(inherited, j))
+        j = j + 1
+    }
+
+    // Then the command's own local and persistent flags and help, sorted
+    lf: *FlagSet = (*c).flags
+    pf: *FlagSet = (*c).pflags
+    completionCollectFlagNames(names, lf)
+    completionCollectFlagNames(names, pf)
+    completionPushUnique(names, "help")
+    vec_sort(names, str_cmp)
+
+    // The arm label
+    sb_push(sb, "        \"")
+    sb_push(sb, lbl)
+    sb_push(sb, "\") opts=\"")
+
+    // The words
+    mut w: int64 = 0
+    while w < vec_len(words) {
+        sb_push(sb, vec_get(words, w))
+        sb_push(sb, " ")
+        w = w + 1
+    }
+
+    // -h and the long flags
+    sb_push(sb, "-h")
+    mut n: int64 = 0
+    while n < vec_len(names) {
+        sb_push(sb, " --")
+        sb_push(sb, vec_get(names, n))
+        n = n + 1
+    }
+    sb_push(sb, "\" ;;\n")
+}
+
+/**
+ * completionWalk
+ * Walks the tree depth first, appending the word table arms to mapSb and the candidate table arms to optsSb
+ * @param c {*Command} - the command to visit
+ * @param lbl {string} - its case label
+ * @param inherited {*Vector<string>} - the long names of the ancestors' persistent flags
+ * @param mapSb {*StringBuilder} - the builder for the word table
+ * @param optsSb {*StringBuilder} - the builder for the candidate table
+ * @return ...
+ **/
+func completionWalk(c: *Command, lbl: string, inherited: *Vector<string>, mapSb: *StringBuilder, optsSb: *StringBuilder) -> void {
+    // The visible children and this command's candidate arm
+    shown: *Vector<*Command> = cmdVisibleKids(c)
+    completionPushOptsArm(optsSb, c, lbl, shown, inherited)
+
+    // The inherited names for the children, plus this command's persistent flags
+    sub: *Vector<string> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < vec_len(inherited) {
+        completionPushUnique(sub, vec_get(inherited, i))
+        i = i + 1
+    }
+    pf: *FlagSet = (*c).pflags
+    completionCollectFlagNames(sub, pf)
+
+    // Loop over the children
+    mut j: int64 = 0
+    while j < vec_len(shown) {
+        // The child and its label
+        k: *Command = vec_get(shown, j)
+        child: string = completionChildLabel(lbl, (*k).name)
+
+        // One word arm for the name and one per alias
+        completionPushMapArm(mapSb, lbl, (*k).name, child)
+        aliases: *Vector<string> = (*k).aliases
+        mut a: int64 = 0
+        while a < vec_len(aliases) {
+            completionPushMapArm(mapSb, lbl, vec_get(aliases, a), child)
+            a = a + 1
+        }
+
+        // Recurse into the child
+        completionWalk(k, child, sub, mapSb, optsSb)
+        j = j + 1
+    }
+}
+
+// Appends the bash completion function, the definition only with no complete call
+func completionPushBashFunc(sb: *StringBuilder, rootc: *Command, fname: string) -> void {
+    // Build the word table and candidate table by walking the tree
+    mapSb: *StringBuilder = alloc(sb_new())
+    optsSb: *StringBuilder = alloc(sb_new())
+    inherited: *Vector<string> = alloc(vec_new())
+    completionWalk(rootc, "", inherited, mapSb, optsSb)
+
+    // The function head
+    sb_push(sb, fname)
+    sb_push(sb, "()\n")
+    sb_push(sb, "{\n")
+    sb_push(sb, "    local cur cmd word opts i\n")
+    sb_push(sb, "    COMPREPLY=()\n")
+    sb_push(sb, "    cur=\"${COMP_WORDS[COMP_CWORD]}\"\n")
+    sb_push(sb, "    cmd=\"\"\n")
+    sb_push(sb, "    i=1\n")
+
+    // The loop that walks the words typed so far through the word table
+    sb_push(sb, "    while [ \"$i\" -lt \"$COMP_CWORD\" ]; do\n")
+    sb_push(sb, "        word=\"${COMP_WORDS[$i]}\"\n")
+    sb_push(sb, "        i=$((i + 1))\n")
+    sb_push(sb, "        case \"$word\" in\n")
+    sb_push(sb, "            -*) continue ;;\n")
+    sb_push(sb, "        esac\n")
+    sb_push(sb, "        case \"$cmd|$word\" in\n")
+    sb_push(sb, sb_cstr(mapSb))
+    sb_push(sb, "            *) continue ;;\n")
+    sb_push(sb, "        esac\n")
+    sb_push(sb, "    done\n")
+
+    // The candidate lookup and the reply
+    sb_push(sb, "    opts=\"\"\n")
+    sb_push(sb, "    case \"$cmd\" in\n")
+    sb_push(sb, sb_cstr(optsSb))
+    sb_push(sb, "    esac\n")
+    sb_push(sb, "    COMPREPLY=( $(compgen -W \"$opts\" -- \"$cur\") )\n")
+    sb_push(sb, "    return 0\n")
+    sb_push(sb, "}\n")
+
+    // Free the table builders
+    sb_free(mapSb)
+    free(mapSb)
+    sb_free(optsSb)
+    free(optsSb)
+}
+
+// Appends the complete -o default -F <fname> <app> line
+func completionPushRegister(sb: *StringBuilder, app: string, fname: string) -> void {
+    sb_push(sb, "complete -o default -F ")
+    sb_push(sb, fname)
+    sb_push(sb, " ")
+    sb_push(sb, app)
+    sb_push(sb, "\n")
+}
+
+/**
+ * completionBashScript
+ * Builds the bash completion script for the tree under rootc, a header comment, the function and the complete registration
+ * @param rootc {*Command} - the root command, paths already fixed up by novaExecute
+ * @param app {string} - the application name, borrowed
+ * @return a fresh heap string ending in a newline
+ **/
+export func completionBashScript(rootc: *Command, app: string) -> string {
+    // The function name and a builder
+    fname: string = completionFuncName(app)
+    sb: *StringBuilder = alloc(sb_new())
+
+    // The header comment
+    sb_push(sb, "# bash completion for ")
+    sb_push(sb, app)
+    sb_push(sb, "\n")
+    sb_push(sb, "#\n")
+    sb_push(sb, "# Generated by nova. The command tree is baked in, so regenerate the\n")
+    sb_push(sb, "# script whenever the commands or flags change.\n")
+    sb_push(sb, "#\n")
+    sb_push(sb, "#   source <(")
+    sb_push(sb, app)
+    sb_push(sb, " completion bash)\n")
+    sb_push(sb, "\n")
+
+    // The function and the registration
+    completionPushBashFunc(sb, rootc, fname)
+    sb_push(sb, "\n")
+    completionPushRegister(sb, app, fname)
+
+    // Copy the text out and free the builder
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    free(fname)
+    return out
+}
+
+/**
+ * completionZshScript
+ * Builds the zsh completion script for the tree under rootc, it turns on bashcompinit and reuses the bash function
+ * @param rootc {*Command} - the root command, paths already fixed up by novaExecute
+ * @param app {string} - the application name, borrowed
+ * @return a fresh heap string ending in a newline
+ **/
+export func completionZshScript(rootc: *Command, app: string) -> string {
+    // The function name and a builder
+    fname: string = completionFuncName(app)
+    sb: *StringBuilder = alloc(sb_new())
+
+    // The header comment
+    sb_push(sb, "#compdef ")
+    sb_push(sb, app)
+    sb_push(sb, "\n")
+    sb_push(sb, "#\n")
+    sb_push(sb, "# zsh completion for ")
+    sb_push(sb, app)
+    sb_push(sb, ", generated by nova. It reuses the bash\n")
+    sb_push(sb, "# completion function: bashcompinit provides compgen and complete under\n")
+    sb_push(sb, "# zsh, and complete registers the function with compdef for us.\n")
+    sb_push(sb, "#\n")
+    sb_push(sb, "#   source <(")
+    sb_push(sb, app)
+    sb_push(sb, " completion zsh)\n")
+    sb_push(sb, "\n")
+
+    // Turn on bashcompinit
+    sb_push(sb, "autoload -U +X bashcompinit && bashcompinit\n")
+    sb_push(sb, "\n")
+
+    // The function and the registration
+    completionPushBashFunc(sb, rootc, fname)
+    sb_push(sb, "\n")
+    completionPushRegister(sb, app, fname)
+
+    // Copy the text out and free the builder
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    free(fname)
+    return out
+}
+
+// The handler of the builtin completion command, writes the script for the named shell to stdout
+func completionRun(ctx: *Context) -> int32 {
+    // The shell asked for and the app name
+    shell: string = ctx.arg(0)
+    rootc: *Command = (*ctx).root
+    app: string = (*rootc).name
+
+    // The bash script
+    if shell == "bash" {
+        bs: string = completionBashScript(rootc, app)
+        print(bs)
+        free(bs)
+        return 0
+    }
+
+    // The zsh script
+    if shell == "zsh" {
+        zs: string = completionZshScript(rootc, app)
+        print(zs)
+        free(zs)
+        return 0
+    }
+
+    // Anything else is an error
+    return ctx.fail("unsupported shell \"" + shell + "\"")
+}
+
+/**
+ * completionCommandNew
+ * Builds the builtin completion [bash|zsh] command novaExecute adds to a root with subcommands
+ * @param appName {string} - the root command's name, used in the long description
+ * @return the new command
+ **/
+export func completionCommandNew(appName: string) -> *Command {
+    // The command with its use and short
+    c: *Command = cmdNew("completion [bash|zsh]", "Generate the autocompletion script for the specified shell")
+
+    // The long description
+    c.setLong("Generate the autocompletion script for " + appName + " for the specified shell.\n\nThe script is self-contained: the command tree is baked into it when it is\ngenerated, so regenerate it whenever the commands change.\n\nbash:\n  source <(" + appName + " completion bash)\n  " + appName + " completion bash > /etc/bash_completion.d/" + appName + "\n\nzsh:\n  The zsh script reuses the bash function through bashcompinit.\n  source <(" + appName + " completion zsh)\n  " + appName + " completion zsh > \"${fpath[1]}/_" + appName + "\"")
+
+    // One positional, the shell name, with bash and zsh as the valid args
+    c.setArgs(argsExact(1))
+    c.addValidArg("bash")
+    c.addValidArg("zsh")
+
+    // The handler
+    c.setRun(completionRun)
+
+    // Mark it builtin so inherited required flags skip it
+    (*c).isBuiltin = true
+    return c
+}

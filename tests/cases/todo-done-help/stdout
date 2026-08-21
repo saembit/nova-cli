@@ -1,0 +1,11 @@
+Mark a todo item done
+
+Usage:
+  todo done [flags]
+
+Flags:
+      --by string   who completed it
+  -h, --help        help for done
+
+Global Flags:
+  -v, --verbose   verbose output

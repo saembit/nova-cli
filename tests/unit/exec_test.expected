@@ -1,0 +1,348 @@
+## root help
+app exercises novaExecute.
+
+Usage:
+  app [command]
+
+Examples:
+  app serve -p 9090
+  app greet bob --from ann
+
+Available Commands:
+  completion  Generate the autocompletion script for the specified shell
+  fail        Return 4 from run
+  greet       Greet someone
+  help        Help about any command
+  serve       Start the server
+  shadow      Shadow the root's --verbose
+
+Flags:
+  -c, --config string   config file
+  -h, --help            help for app
+  -v, --verbose         verbose output
+      --version         version for app
+
+Use "app [command] --help" for more information about a command.
+== app --help -> 0
+
+## bare root (non-runnable prints help)
+app exercises novaExecute.
+
+Usage:
+  app [command]
+
+Examples:
+  app serve -p 9090
+  app greet bob --from ann
+
+Available Commands:
+  completion  Generate the autocompletion script for the specified shell
+  fail        Return 4 from run
+  greet       Greet someone
+  help        Help about any command
+  serve       Start the server
+  shadow      Shadow the root's --verbose
+
+Flags:
+  -c, --config string   config file
+  -h, --help            help for app
+  -v, --verbose         verbose output
+      --version         version for app
+
+Use "app [command] --help" for more information about a command.
+== app -> 0
+
+## subcommand help via -h after flags
+hook: root persistentPreRun for app serve
+hook: serve preRun
+serve: port=1 host=localhost debug=false verbose=false config=[] nargs=0
+serve: changed port=true host=false
+hook: serve postRun
+hook: root persistentPostRun
+== app serve -p 1 -> 0
+
+Start the server
+
+Usage:
+  app serve [flags]
+
+Aliases:
+  serve, s
+
+Flags:
+  -d, --debug         debug mode
+  -h, --help          help for serve
+      --host string   host to bind (default "localhost")
+  -p, --port int      port to listen on (default 8080)
+
+Global Flags:
+  -c, --config string   config file
+  -v, --verbose         verbose output
+== app serve -h -> 0
+
+## help subcommand
+hook: root persistentPreRun for app help
+Greet someone
+
+Usage:
+  app greet <name> [flags]
+
+Flags:
+      --from string   who greets
+  -h, --help          help for greet
+  -l, --loud          shout
+
+Global Flags:
+  -c, --config string   config file
+  -v, --verbose         verbose output
+hook: root persistentPostRun
+== app help greet -> 0
+
+hook: root persistentPreRun for app help
+Unknown help topic [nosuch]
+Usage:
+  app [command]
+
+Examples:
+  app serve -p 9090
+  app greet bob --from ann
+
+Available Commands:
+  completion  Generate the autocompletion script for the specified shell
+  fail        Return 4 from run
+  greet       Greet someone
+  help        Help about any command
+  serve       Start the server
+  shadow      Shadow the root's --verbose
+
+Flags:
+  -c, --config string   config file
+  -h, --help            help for app
+  -v, --verbose         verbose output
+      --version         version for app
+
+Use "app [command] --help" for more information about a command.
+== app help nosuch -> 1
+
+## version
+app version 0.1.0
+== app --version -> 0
+
+Error: unknown flag: --version
+Run 'app serve --help' for usage.
+== app serve --version -> 1
+
+## unknown flag / shorthand
+Error: unknown flag: --nope
+Run 'app serve --help' for usage.
+== app serve --nope -> 1
+
+Error: unknown shorthand flag: 'x' in -x
+Run 'app serve --help' for usage.
+== app serve -dx -> 1
+
+## short cluster, attached and spaced values, persistent flags
+Error: flag needs an argument: 'c' in -c
+Run 'app serve --help' for usage.
+== app -v s -dp9090 --host=example.org -c -> 1
+
+hook: root persistentPreRun for app serve
+hook: serve preRun
+serve: port=1234 host=localhost debug=false verbose=true config=[x.toml] nargs=0
+serve: changed port=true host=false
+hook: serve postRun
+hook: root persistentPostRun
+== app s -vdp 1234 -c x.toml --debug=false -> 0
+
+Error: invalid argument "abc" for "--port" flag: expected an integer
+Run 'app serve --help' for usage.
+== app serve --port abc -> 1
+
+Flag --legacy has been deprecated, use --host instead
+hook: root persistentPreRun for app serve
+hook: serve preRun
+serve: port=8080 host=localhost debug=false verbose=false config=[] nargs=0
+serve: changed port=false host=false
+hook: serve postRun
+hook: root persistentPostRun
+== app serve --legacy x -> 0
+
+## double dash and args errors
+Error: unknown command "-p" for "app serve"
+Run 'app serve --help' for usage.
+== app serve -- -p -> 1
+
+hook: root persistentPreRun for app greet
+greet: --bob from ann loud=false
+hook: root persistentPostRun
+== app greet --from ann -- --bob -> 0
+
+Error: accepts 1 arg(s), received 0
+Run 'app greet --help' for usage.
+== app greet --from ann -l -> 1
+
+Error: required flag(s) "from" not set
+Run 'app greet --help' for usage.
+== app greet bob -> 1
+
+hook: root persistentPreRun for app greet
+greet: bad from ann loud=false
+Error: cannot greet bad
+Run 'app greet --help' for usage.
+== app greet bad --from ann -> 1
+
+## unknown command, hidden, deprecated, disableFlagParsing
+Error: unknown command "bogus" for "app"
+Run 'app --help' for usage.
+== app bogus -> 1
+
+hook: root persistentPreRun for app secret
+secret: path=app secret
+secret arg: -x
+secret arg: --
+secret arg: y
+hook: root persistentPostRun
+== app secret -x -- y -> 0
+
+Command "old" is deprecated, use serve instead
+hook: root persistentPreRun for app old
+old: ran
+hook: root persistentPostRun
+== app old -> 0
+
+## hook order and nonzero return
+hook: root persistentPreRun for app fail
+failing run
+== app fail -> 4
+
+## child persistent flag shadows the root's (long and short)
+hook: root persistentPreRun for app shadow
+shadow: path=app shadow verbose=[loud] root-verbose-changed=false
+hook: root persistentPostRun
+== app shadow -v loud -> 0
+
+hook: root persistentPreRun for app shadow
+shadow: path=app shadow verbose=[quiet] root-verbose-changed=false
+hook: root persistentPostRun
+== app shadow --verbose=quiet -> 0
+
+Error: flag needs an argument: 'v' in -v
+Run 'app shadow --help' for usage.
+== app -v shadow -> 1
+
+hook: root persistentPreRun for app shadow deep
+shadow: path=app shadow deep verbose=[x] root-verbose-changed=false
+hook: root persistentPostRun
+== app shadow deep -v x -> 0
+
+Shadow the root's --verbose
+
+Usage:
+  app shadow [flags]
+  app shadow [command]
+
+Available Commands:
+  deep  Inherit the shadowing flag
+
+Flags:
+  -h, --help             help for shadow
+  -v, --verbose string   verbosity level (shadows the root's)
+
+Global Flags:
+  -c, --config string   config file
+
+Use "app shadow [command] --help" for more information about a command.
+== app shadow --help -> 0
+
+Inherit the shadowing flag
+
+Usage:
+  app shadow deep [flags]
+
+Flags:
+  -h, --help   help for deep
+
+Global Flags:
+  -c, --config string    config file
+  -v, --verbose string   verbosity level (shadows the root's)
+== app shadow deep -h -> 0
+
+## root-local flag before a subcommand, flag value naming a command
+Error: unknown flag: --version
+Run 'app serve --help' for usage.
+== app --version serve -> 1
+
+hook: root persistentPreRun for app greet
+greet: bob from serve loud=false
+hook: root persistentPostRun
+== app greet --from serve bob -> 0
+
+Error: bad flag syntax: --=x
+Run 'app serve --help' for usage.
+== app --=x serve -> 1
+
+## builtin help/completion skip the required-flag check; disableCompletionCmd
+Required persistent flag, no completion
+
+Usage:
+  app2 [command]
+
+Available Commands:
+  go    Needs the token
+  help  Help about any command
+
+Flags:
+  -h, --help           help for app2
+  -t, --token string   api token
+
+Use "app2 [command] --help" for more information about a command.
+== app2 help -> 0
+
+Needs the token
+
+Usage:
+  app2 go [flags]
+
+Flags:
+  -h, --help   help for go
+
+Global Flags:
+  -t, --token string   api token
+== app2 help go -> 0
+
+Error: required flag(s) "token" not set
+Run 'app2 go --help' for usage.
+== app2 go -> 1
+
+go: token=abc
+== app2 go -t abc -> 0
+
+Error: unknown command "completion" for "app2"
+Run 'app2 --help' for usage.
+== app2 completion bash -> 1
+
+Error: unsupported shell "fish"
+Run 'app3 completion --help' for usage.
+== app3 completion fish -> 1
+
+Required persistent flag, with completion
+
+Usage:
+  app3 [command]
+
+Available Commands:
+  completion  Generate the autocompletion script for the specified shell
+  go          Needs the token
+  help        Help about any command
+
+Flags:
+  -h, --help           help for app3
+  -t, --token string   api token
+
+Use "app3 [command] --help" for more information about a command.
+== app3 --help -> 0
+
+## ctxLookup
+lookup port: found=true index=0 len=4
+lookup verbose: found=true index=0 len=2
+lookup help: found=false index=-1 len=4

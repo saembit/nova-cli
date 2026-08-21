@@ -1,0 +1,573 @@
+// Unit test root for nova/exec.dusk, and through it command, context, help and
+// parse. Run it with cd tests/unit && dusk run exec_test.dusk 2>&1 | diff - exec_test.expected.
+// Both stdout and stderr are checked, so the expected file interleaves them the
+// way an unbuffered terminal would, every line flushed as it is printed.
+// Each argv below is a fixed array minted as collector<string[]>, because
+// novaExecute stores argv in a heap Context handed to opaque handlers and the
+// escape checker refuses a plain frame slice here, a real application's own
+// argv from main is fine.
+@paradigm oop
+@paradigm procedural
+
+// Stdlib pieces the assertions lean on
+@import std.string
+@import std.vector
+
+// The whole nova library, since executing a command touches all of it
+@import nova.command
+@import nova.context
+@import nova.flagset
+@import nova.args
+@import nova.text
+@import nova.exec
+
+/**
+ * rootPpre
+ * Prints the root persistentPreRun line together with the command it is running for
+ * @param ctx {*Context} - the run context nova hands to the hook
+ * @return int32 - 0 so the chain keeps going
+ **/
+func rootPpre(ctx: *Context) -> int32 {
+    // The path shows which command inherited the hook
+    println("hook: root persistentPreRun for " + ctx.commandPath())
+
+    // Keep the chain going
+    return 0
+}
+
+/**
+ * rootPpost
+ * Prints the root persistentPostRun line, the last hook of a successful run
+ * @param ctx {*Context} - the run context nova hands to the hook
+ * @return int32 - 0, the chain is over anyway
+ **/
+func rootPpost(ctx: *Context) -> int32 {
+    // Announce the hook
+    println("hook: root persistentPostRun")
+
+    // Nothing is left to stop
+    return 0
+}
+
+/**
+ * servePre
+ * Prints the preRun line for the serve command
+ * @param ctx {*Context} - the run context nova hands to the hook
+ * @return int32 - 0 so the chain keeps going
+ **/
+func servePre(ctx: *Context) -> int32 {
+    // Announce the hook
+    println("hook: serve preRun")
+
+    // Keep the chain going
+    return 0
+}
+
+/**
+ * serveRun
+ * Prints every flag serve can see, local and inherited, plus which of them were actually set
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func serveRun(ctx: *Context) -> int32 {
+    // The local flags plus the persistent ones inherited from the root
+    println("serve: port={} host={} debug={} verbose={} config=[{}] nargs={}", ctx.getInt("port"), ctx.getStr("host"), textBool(ctx.getBool("debug")), textBool(ctx.getBool("verbose")), ctx.getStr("config"), ctx.nargs())
+
+    // Whether the value came off the command line or out of the default
+    println("serve: changed port={} host={}", textBool(ctx.changed("port")), textBool(ctx.changed("host")))
+
+    // Serving cannot fail here
+    return 0
+}
+
+/**
+ * servePost
+ * Prints the postRun line for the serve command
+ * @param ctx {*Context} - the run context nova hands to the hook
+ * @return int32 - 0 so the chain keeps going
+ **/
+func servePost(ctx: *Context) -> int32 {
+    // Announce the hook
+    println("hook: serve postRun")
+
+    // Keep the chain going
+    return 0
+}
+
+/**
+ * greetRun
+ * Prints the greeting and fails through ctx.fail when the name is bad
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - 0 normally, or whatever ctx.fail returns for the bad name
+ **/
+func greetRun(ctx: *Context) -> int32 {
+    // The name, the required --from flag and the optional --loud
+    println("greet: {} from {} loud={}", ctx.arg(0), ctx.getStr("from"), textBool(ctx.getBool("loud")))
+
+    // Check if the name is the one the handler refuses, then report it the nova way
+    if ctx.arg(0) == "bad" {
+        return ctx.fail("cannot greet bad")
+    }
+
+    // Any other name is fine
+    return 0
+}
+
+/**
+ * failRun
+ * Returns 4 so the rest of the hook chain is skipped and 4 becomes the exit code
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - 4, which stops the chain
+ **/
+func failRun(ctx: *Context) -> int32 {
+    // Announce the handler
+    println("failing run")
+
+    // Stop the chain here
+    return 4
+}
+
+/**
+ * failPost
+ * Registered as a postRun purely to prove a failed run never reaches it
+ * @param ctx {*Context} - the run context nova hands to the hook
+ * @return int32 - 0, never reached in practice
+ **/
+func failPost(ctx: *Context) -> int32 {
+    // This line must never appear in the expected file
+    println("fail postRun (must not print)")
+
+    // Keep the chain going
+    return 0
+}
+
+/**
+ * secretRun
+ * Prints the command path and every raw token, since the secret command turns flag parsing off
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func secretRun(ctx: *Context) -> int32 {
+    // The path resolves the same way it would for a listed command
+    println("secret: path=" + ctx.commandPath())
+
+    // Index of the current token
+    mut i: int64 = 0
+
+    // Loop iterating through the tokens, dashes and -- included
+    while i < ctx.nargs() {
+        // Print the current token
+        println("secret arg: " + ctx.arg(i))
+
+        // Move to the next token
+        i = i + 1
+    }
+
+    // Echoing cannot fail
+    return 0
+}
+
+/**
+ * oldRun
+ * Prints one line so it is clear a deprecated command still runs
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func oldRun(ctx: *Context) -> int32 {
+    // The deprecation warning nova prints ahead of this goes to stderr
+    println("old: ran")
+
+    // Deprecated is not broken
+    return 0
+}
+
+/**
+ * shadowRun
+ * Prints the shadowing string --verbose and shows the root's bool of the same name was left alone
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func shadowRun(ctx: *Context) -> int32 {
+    // The root of the tree this run walked
+    rootc: *Command = (*ctx).root
+
+    // The root's own persistent set, which still holds the bool --verbose
+    rp: *FlagSet = (*rootc).pflags
+
+    // The nearer definition wins for both spellings, and the root's flag stays untouched
+    println("shadow: path={} verbose=[{}] root-verbose-changed={}", ctx.commandPath(), ctx.getStr("verbose"), textBool(rp.changed("verbose")))
+
+    // Nothing here can fail
+    return 0
+}
+
+/**
+ * goRun
+ * Prints the required persistent --token so it is clear the check let the run through
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func goRun(ctx: *Context) -> int32 {
+    // The token the root demands
+    println("go: token=" + ctx.getStr("token"))
+
+    // Nothing here can fail
+    return 0
+}
+
+/**
+ * buildRoot
+ * Builds the main test tree, one root plus the six subcommands the cases below drive
+ * @return *Command - the root command handed to novaExecute
+ **/
+func buildRoot() -> *Command {
+    // The root command, name and one line description
+    root: *Command = cmdNew("app", "A test application")
+
+    // The long description and the version, both shown by the help renderer
+    root.setLong("app exercises novaExecute.")
+    root.setVersion("0.1.0")
+
+    // The example block printed under the long description
+    root.setExample("  app serve -p 9090\n  app greet bob --from ann")
+
+    // Two persistent flags, which every command in the tree inherits
+    root.persistentFlags().addBool("verbose", "v", false, "verbose output")
+    root.persistentFlags().addStr("config", "c", "", "config file")
+
+    // The persistent hooks, inherited the same way
+    root.setPersistentPreRun(rootPpre)
+    root.setPersistentPostRun(rootPpost)
+
+    // serve carries the full spread of local flag kinds
+    serve: *Command = cmdNew("serve [flags]", "Start the server")
+
+    // A one letter spelling of the command name
+    serve.addAlias("s")
+
+    // serve takes no positional arguments
+    serve.setArgs(argsNone())
+
+    // One flag of every kind, plus a deprecated one that warns when used
+    serve.localFlags().addInt("port", "p", 8080, "port to listen on")
+    serve.localFlags().addStr("host", "", "localhost", "host to bind")
+    serve.localFlags().addBool("debug", "d", false, "debug mode")
+    serve.localFlags().addStr("legacy", "", "", "old option")
+    serve.localFlags().markDeprecated("legacy", "use --host instead")
+
+    // The full hook chain around the handler
+    serve.setPreRun(servePre)
+    serve.setRun(serveRun)
+    serve.setPostRun(servePost)
+
+    // Hang it off the root
+    root.addCommand(serve)
+
+    // greet pairs one positional argument with a required flag
+    greet: *Command = cmdNew("greet <name>", "Greet someone")
+
+    // Exactly one positional argument, the name
+    greet.setArgs(argsExact(1))
+
+    // An optional bool and a required string
+    greet.localFlags().addBool("loud", "l", false, "shout")
+    greet.localFlags().addStr("from", "", "", "who greets")
+    greet.localFlags().markRequired("from")
+
+    // The handler
+    greet.setRun(greetRun)
+
+    // Hang it off the root
+    root.addCommand(greet)
+
+    // failing shows a non zero return cutting the chain short
+    failing: *Command = cmdNew("fail", "Return 4 from run")
+
+    // The handler that returns 4, and the postRun it therefore never reaches
+    failing.setRun(failRun)
+    failing.setPostRun(failPost)
+
+    // Hang it off the root
+    root.addCommand(failing)
+
+    // secret is hidden from help and parses no flags of its own
+    secret: *Command = cmdNew("secret", "Hidden command")
+
+    // Out of the help listing, but still runnable by name
+    secret.setHidden(true)
+
+    // Every remaining token reaches the handler untouched
+    secret.setDisableFlagParsing(true)
+
+    // The handler
+    secret.setRun(secretRun)
+
+    // Hang it off the root
+    root.addCommand(secret)
+
+    // old is the deprecated command, still runnable and warned about on stderr
+    old: *Command = cmdNew("old", "Deprecated command")
+
+    // The message nova prints before every run, which also keeps it out of help
+    old.setDeprecated("use serve instead")
+
+    // The handler
+    old.setRun(oldRun)
+
+    // Hang it off the root
+    root.addCommand(old)
+
+    // shadow redefines the root's persistent --verbose as a string flag
+    shadow: *Command = cmdNew("shadow", "Shadow the root's --verbose")
+
+    // The nearer definition must win for the long name and the shorthand alike
+    shadow.persistentFlags().addStr("verbose", "v", "", "verbosity level (shadows the root's)")
+
+    // The handler
+    shadow.setRun(shadowRun)
+
+    // A child of shadow, to prove the shadowing flag is inherited one level further down
+    deep: *Command = cmdNew("deep", "Inherit the shadowing flag")
+
+    // The same handler, since it prints exactly what needs checking
+    deep.setRun(shadowRun)
+
+    // Hang deep off shadow and shadow off the root
+    shadow.addCommand(deep)
+    root.addCommand(shadow)
+
+    // Hand the finished tree back to the caller
+    return root
+}
+
+/**
+ * buildRoot2
+ * Builds a root whose required persistent flag must not get in the way of the builtin help command
+ * @return *Command - a root with the builtin completion command disabled
+ **/
+func buildRoot2() -> *Command {
+    // The root command, name and one line description
+    root: *Command = cmdNew("app2", "Required persistent flag, no completion")
+
+    // A persistent flag every run has to supply
+    root.persistentFlags().addStr("token", "t", "", "api token")
+    root.persistentFlags().markRequired("token")
+
+    // Drop the builtin completion command from this tree
+    root.setDisableCompletionCmd(true)
+
+    // One ordinary subcommand that does have to supply the token
+    go: *Command = cmdNew("go", "Needs the token")
+    go.setRun(goRun)
+    root.addCommand(go)
+
+    // Hand the finished tree back to the caller
+    return root
+}
+
+/**
+ * buildRoot3
+ * Builds the same tree as buildRoot2 but keeps the builtin completion command
+ * @return *Command - a root with the required flag and completion both in place
+ **/
+func buildRoot3() -> *Command {
+    // The root command, name and one line description
+    root: *Command = cmdNew("app3", "Required persistent flag, with completion")
+
+    // The same persistent flag every run has to supply
+    root.persistentFlags().addStr("token", "t", "", "api token")
+    root.persistentFlags().markRequired("token")
+
+    // The same ordinary subcommand
+    go: *Command = cmdNew("go", "Needs the token")
+    go.setRun(goRun)
+    root.addCommand(go)
+
+    // Hand the finished tree back to the caller
+    return root
+}
+
+/**
+ * show
+ * Closes one case with the command line it ran and the exit code it produced
+ * @param label {string} - the command line as it would be typed
+ * @param code {int32} - the exit code novaExecute returned
+ * @return void
+ **/
+func show(label: string, code: int32) -> void {
+    // The case and its exit code
+    println("== {} -> {}", label, code)
+
+    // A blank line between cases
+    println("")
+}
+
+/**
+ * main
+ * Runs every execution case against the three test trees and prints what each one produced
+ * @param argc {int32} - the argument count, unused here
+ * @param argv {string[]} - the raw command line, unused here since every case mints its own
+ * @return int32 - 0, the diff against the expected file is what decides the result
+ **/
+func main(argc: int32, argv: string[]) -> int32 {
+    // The main test tree
+    root: *Command = buildRoot()
+
+    // Help for the root, asked for by flag
+    println("## root help")
+    a1: string[2] = ["app", "--help"]
+    show("app --help", novaExecute(root, collector<string[]>(a1[0..a1.len])))
+
+    // The root has no run of its own, so it prints its help too
+    println("## bare root (non-runnable prints help)")
+    a2: string[1] = ["app"]
+    show("app", novaExecute(root, collector<string[]>(a2[0..a2.len])))
+
+    // A normal run, then the same command with -h after its flags
+    println("## subcommand help via -h after flags")
+    a3: string[4] = ["app", "serve", "-p", "1"]
+    show("app serve -p 1", novaExecute(root, collector<string[]>(a3[0..a3.len])))
+    a4: string[3] = ["app", "serve", "-h"]
+    show("app serve -h", novaExecute(root, collector<string[]>(a4[0..a4.len])))
+
+    // The builtin help command, for a command that exists and one that does not
+    println("## help subcommand")
+    a5: string[3] = ["app", "help", "greet"]
+    show("app help greet", novaExecute(root, collector<string[]>(a5[0..a5.len])))
+    a6: string[3] = ["app", "help", "nosuch"]
+    show("app help nosuch", novaExecute(root, collector<string[]>(a6[0..a6.len])))
+
+    // The version flag on the root, and on a subcommand that never declared it
+    println("## version")
+    a7: string[2] = ["app", "--version"]
+    show("app --version", novaExecute(root, collector<string[]>(a7[0..a7.len])))
+    a8: string[3] = ["app", "serve", "--version"]
+    show("app serve --version", novaExecute(root, collector<string[]>(a8[0..a8.len])))
+
+    // A long name nothing declares, then a cluster with an unknown letter in it
+    println("## unknown flag / shorthand")
+    a9: string[3] = ["app", "serve", "--nope"]
+    show("app serve --nope", novaExecute(root, collector<string[]>(a9[0..a9.len])))
+    a10: string[3] = ["app", "serve", "-dx"]
+    show("app serve -dx", novaExecute(root, collector<string[]>(a10[0..a10.len])))
+
+    // The spellings the parser has to take apart, including a shorthand left without its value
+    println("## short cluster, attached and spaced values, persistent flags")
+    a11: string[6] = ["app", "-v", "s", "-dp9090", "--host=example.org", "-c"]
+    show("app -v s -dp9090 --host=example.org -c", novaExecute(root, collector<string[]>(a11[0..a11.len])))
+    a12: string[7] = ["app", "s", "-vdp", "1234", "-c", "x.toml", "--debug=false"]
+    show("app s -vdp 1234 -c x.toml --debug=false", novaExecute(root, collector<string[]>(a12[0..a12.len])))
+    a13: string[4] = ["app", "serve", "--port", "abc"]
+    show("app serve --port abc", novaExecute(root, collector<string[]>(a13[0..a13.len])))
+    a14: string[4] = ["app", "serve", "--legacy", "x"]
+    show("app serve --legacy x", novaExecute(root, collector<string[]>(a14[0..a14.len])))
+
+    // Everything after -- is positional, which serve refuses and greet accepts
+    println("## double dash and args errors")
+    a15: string[4] = ["app", "serve", "--", "-p"]
+    show("app serve -- -p", novaExecute(root, collector<string[]>(a15[0..a15.len])))
+    a16: string[6] = ["app", "greet", "--from", "ann", "--", "--bob"]
+    show("app greet --from ann -- --bob", novaExecute(root, collector<string[]>(a16[0..a16.len])))
+
+    // Too few arguments, a missing required flag, and the handler failing on its own
+    a17: string[5] = ["app", "greet", "--from", "ann", "-l"]
+    show("app greet --from ann -l", novaExecute(root, collector<string[]>(a17[0..a17.len])))
+    a18: string[3] = ["app", "greet", "bob"]
+    show("app greet bob", novaExecute(root, collector<string[]>(a18[0..a18.len])))
+    a19: string[5] = ["app", "greet", "bad", "--from", "ann"]
+    show("app greet bad --from ann", novaExecute(root, collector<string[]>(a19[0..a19.len])))
+
+    // A name that matches nothing, then the two commands help never lists
+    println("## unknown command, hidden, deprecated, disableFlagParsing")
+    a20: string[2] = ["app", "bogus"]
+    show("app bogus", novaExecute(root, collector<string[]>(a20[0..a20.len])))
+    a21: string[5] = ["app", "secret", "-x", "--", "y"]
+    show("app secret -x -- y", novaExecute(root, collector<string[]>(a21[0..a21.len])))
+    a22: string[2] = ["app", "old"]
+    show("app old", novaExecute(root, collector<string[]>(a22[0..a22.len])))
+
+    // The failing handler, whose 4 becomes the exit code and skips the rest of the chain
+    println("## hook order and nonzero return")
+    a23: string[2] = ["app", "fail"]
+    show("app fail", novaExecute(root, collector<string[]>(a23[0..a23.len])))
+
+    // The shadowing flag under both spellings, at the root, one level down and in help
+    println("## child persistent flag shadows the root's (long and short)")
+    a24: string[4] = ["app", "shadow", "-v", "loud"]
+    show("app shadow -v loud", novaExecute(root, collector<string[]>(a24[0..a24.len])))
+    a25: string[3] = ["app", "shadow", "--verbose=quiet"]
+    show("app shadow --verbose=quiet", novaExecute(root, collector<string[]>(a25[0..a25.len])))
+    a26: string[3] = ["app", "-v", "shadow"]
+    show("app -v shadow", novaExecute(root, collector<string[]>(a26[0..a26.len])))
+    a27: string[5] = ["app", "shadow", "deep", "-v", "x"]
+    show("app shadow deep -v x", novaExecute(root, collector<string[]>(a27[0..a27.len])))
+    a28: string[3] = ["app", "shadow", "--help"]
+    show("app shadow --help", novaExecute(root, collector<string[]>(a28[0..a28.len])))
+    a29: string[4] = ["app", "shadow", "deep", "-h"]
+    show("app shadow deep -h", novaExecute(root, collector<string[]>(a29[0..a29.len])))
+
+    // A root flag ahead of a subcommand, a flag value that spells a command name, and a bare --=x
+    println("## root-local flag before a subcommand, flag value naming a command")
+    a30: string[3] = ["app", "--version", "serve"]
+    show("app --version serve", novaExecute(root, collector<string[]>(a30[0..a30.len])))
+    a31: string[5] = ["app", "greet", "--from", "serve", "bob"]
+    show("app greet --from serve bob", novaExecute(root, collector<string[]>(a31[0..a31.len])))
+    a32: string[3] = ["app", "--=x", "serve"]
+    show("app --=x serve", novaExecute(root, collector<string[]>(a32[0..a32.len])))
+
+    // The tree whose persistent --token is required and whose completion command is gone
+    println("## builtin help/completion skip the required-flag check; disableCompletionCmd")
+    root2: *Command = buildRoot2()
+
+    // The builtin help command runs without the token, in both its forms
+    b1: string[2] = ["app2", "help"]
+    show("app2 help", novaExecute(root2, collector<string[]>(b1[0..b1.len])))
+    b2: string[3] = ["app2", "help", "go"]
+    show("app2 help go", novaExecute(root2, collector<string[]>(b2[0..b2.len])))
+
+    // An ordinary command does have to supply it
+    b3: string[2] = ["app2", "go"]
+    show("app2 go", novaExecute(root2, collector<string[]>(b3[0..b3.len])))
+    b4: string[4] = ["app2", "go", "-t", "abc"]
+    show("app2 go -t abc", novaExecute(root2, collector<string[]>(b4[0..b4.len])))
+
+    // And completion is not there to be run at all
+    b5: string[3] = ["app2", "completion", "bash"]
+    show("app2 completion bash", novaExecute(root2, collector<string[]>(b5[0..b5.len])))
+
+    // The same tree with completion kept, which also skips the required flag check
+    root3: *Command = buildRoot3()
+    b6: string[3] = ["app3", "completion", "fish"]
+    show("app3 completion fish", novaExecute(root3, collector<string[]>(b6[0..b6.len])))
+    b7: string[2] = ["app3", "--help"]
+    show("app3 --help", novaExecute(root3, collector<string[]>(b7[0..b7.len])))
+
+    // The flag lookup a handler getter sits on, driven directly
+    println("## ctxLookup")
+
+    // The command chain a real run would have built, root then its first child
+    chain: *Vector<*Command> = alloc(vec_new())
+    vec_push(chain, root)
+    vec_push(chain, root.child(0))
+
+    // No positional arguments for this one
+    pos: *Vector<string> = alloc(vec_new())
+
+    // A context assembled by hand rather than by novaExecute
+    ctx: *Context = alloc(Context { cmd: root.child(0), root: root, chain: chain, args: pos, argv: collector<string[]>(a1[0..a1.len]) })
+
+    // A local flag, found in the command's own set
+    set1, i1, f1 := ctxLookup(ctx, "port")
+    println("lookup port: found={} index={} len={}", textBool(f1), i1, set1.len())
+
+    // A persistent flag, found by walking up the chain
+    set2, i2, f2 := ctxLookup(ctx, "verbose")
+    println("lookup verbose: found={} index={} len={}", textBool(f2), i2, set2.len())
+
+    // A name nothing declares, which comes back not found
+    set3, i3, f3 := ctxLookup(ctx, "help")
+    println("lookup help: found={} index={} len={}", textBool(f3), i3, set3.len())
+
+    // The test harness compares output, so the exit code is always 0
+    return 0
+}

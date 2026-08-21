@@ -1,0 +1,309 @@
+/**
+ * nova/exec.dusk
+ * novaExecute, the entry point an application's main calls with its root command and argv
+ **/
+@paradigm oop
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import flagset
+@import args
+@import text
+@import command
+@import context
+@import help
+@import completion
+@import parse
+
+// Walks the whole tree, sets every path, resets every flag and adds the builtin commands and --version flag
+func execFixup(rootc: *Command) -> void {
+    // Add the builtin help command when it applies
+    if !(*rootc).disableHelpCmd && rootc.numChildren() > 0 && rootc.findChild("help") < 0 {
+        rootc.addCommand(helpCommandNew((*rootc).name))
+    }
+
+    // Add the builtin completion command when it applies
+    if !(*rootc).disableCompletionCmd && rootc.numChildren() > 0 && rootc.findChild("completion") < 0 {
+        rootc.addCommand(completionCommandNew((*rootc).name))
+    }
+
+    // Add the root's --version flag when a version is declared
+    if (*rootc).version != "" {
+        rf: *FlagSet = (*rootc).flags
+        rp: *FlagSet = (*rootc).pflags
+        if !rf.has("version") && !rp.has("version") {
+            rf.addBool("version", "", false, helpVersionHelp(rootc))
+        }
+    }
+
+    // The root path is its name
+    (*rootc).path = (*rootc).name
+
+    // The worklist of commands to visit
+    work: *Vector<*Command> = alloc(vec_new())
+    vec_push(work, rootc)
+
+    // Loop over the worklist
+    mut w: int64 = 0
+    while w < vec_len(work) {
+        // The current command
+        c: *Command = vec_get(work, w)
+
+        // Reset its local and persistent flags
+        lf: *FlagSet = (*c).flags
+        pf: *FlagSet = (*c).pflags
+        lf.reset()
+        pf.reset()
+
+        // Set the path of each child and queue it
+        kids: *Vector<*Command> = (*c).kids
+        mut i: int64 = 0
+        while i < vec_len(kids) {
+            k: *Command = vec_get(kids, i)
+            (*k).path = (*c).path + " " + (*k).name
+            vec_push(work, k)
+            i = i + 1
+        }
+        w = w + 1
+    }
+}
+
+/**
+ * execVersionRequested
+ * Checks if the root's auto added --version flag was set
+ * @param rootc {*Command} - the root command
+ * @param chainLen {int64} - the length of the matched chain
+ * @return true when the root alone was named and the flag is on
+ **/
+func execVersionRequested(rootc: *Command, chainLen: int64) -> bool {
+    // Only the root with a declared version can be asked
+    if chainLen != 1 || (*rootc).version == "" {
+        return false
+    }
+
+    // Find the version flag on the root
+    rf: *FlagSet = (*rootc).flags
+    i: int64 = rf.find("version")
+    if i < 0 {
+        return false
+    }
+
+    // The flag must be the auto added bool
+    f: *Flag = rf.get(i)
+    if !flagKindEq((*f).kind, FlagKind.KBool) {
+        return false
+    }
+
+    // Return its value
+    return (*f).valB
+}
+
+// Pushes the names of the required but unset flags of fset onto out
+func execCollectMissing(out: *Vector<string>, fset: *FlagSet) -> void {
+    // Loop over the flags in the set
+    mut i: int64 = 0
+    while i < fset.len() {
+        // Push the name when required and not changed
+        f: *Flag = fset.get(i)
+        if (*f).required && !(*f).changed {
+            vec_push(out, (*f).name)
+        }
+        i = i + 1
+    }
+}
+
+// Builds the "required flag(s) ... not set" error over the chain, clean when none are missing
+func execCheckRequired(chain: *Vector<*Command>) -> error {
+    // The names of the missing flags
+    missing: *Vector<string> = alloc(vec_new())
+
+    // The leaf's local flags
+    n: int64 = vec_len(chain)
+    leaf: *Command = vec_get(chain, n - 1)
+    lf: *FlagSet = (*leaf).flags
+    execCollectMissing(missing, lf)
+
+    // The persistent flags of every chain entry
+    mut i: int64 = 0
+    while i < n {
+        c: *Command = vec_get(chain, i)
+        pf: *FlagSet = (*c).pflags
+        execCollectMissing(missing, pf)
+        i = i + 1
+    }
+
+    // Nothing missing
+    if vec_len(missing) == 0 {
+        return error {}
+    }
+
+    // Sort the names and build the message
+    vec_sort(missing, str_cmp)
+    joined: string = textJoinQuoted(missing, ", ")
+    return error { message: "required flag(s) " + joined + " not set" }
+}
+
+// Finds the index of the nearest chain entry with a persistentPreRun, or -1
+func execNearestPpre(chain: *Vector<*Command>) -> int64 {
+    // Walk the chain from the leaf up
+    mut k: int64 = vec_len(chain) - 1
+    while k >= 0 {
+        c: *Command = vec_get(chain, k)
+        if (*c).hasPpre {
+            return k
+        }
+        k = k - 1
+    }
+    return -1
+}
+
+// Finds the index of the nearest chain entry with a persistentPostRun, or -1
+func execNearestPpost(chain: *Vector<*Command>) -> int64 {
+    // Walk the chain from the leaf up
+    mut k: int64 = vec_len(chain) - 1
+    while k >= 0 {
+        c: *Command = vec_get(chain, k)
+        if (*c).hasPpost {
+            return k
+        }
+        k = k - 1
+    }
+    return -1
+}
+
+// Runs the hooks for ctx in order, the first nonzero code wins
+func execRunHooks(ctx: *Context) -> int32 {
+    // The chain and the command that runs
+    chain: *Vector<*Command> = (*ctx).chain
+    curc: *Command = (*ctx).cmd
+
+    // Run the nearest persistentPreRun
+    ppre: int64 = execNearestPpre(chain)
+    if ppre >= 0 {
+        pc: *Command = vec_get(chain, ppre)
+        f1 := (*pc).persistentPreRun
+        r1: int32 = f1(ctx)
+        if r1 != 0 {
+            return r1
+        }
+    }
+
+    // Run the preRun
+    if (*curc).hasPre {
+        f2 := (*curc).preRun
+        r2: int32 = f2(ctx)
+        if r2 != 0 {
+            return r2
+        }
+    }
+
+    // Run the command itself
+    f3 := (*curc).run
+    r3: int32 = f3(ctx)
+    if r3 != 0 {
+        return r3
+    }
+
+    // Run the postRun
+    if (*curc).hasPost {
+        f4 := (*curc).postRun
+        r4: int32 = f4(ctx)
+        if r4 != 0 {
+            return r4
+        }
+    }
+
+    // Run the nearest persistentPostRun
+    ppost: int64 = execNearestPpost(chain)
+    if ppost >= 0 {
+        pc2: *Command = vec_get(chain, ppost)
+        f5 := (*pc2).persistentPostRun
+        return f5(ctx)
+    }
+    return 0
+}
+
+// Reports the unknown command error for word against subject
+func execUnknownCommand(subject: *Command, word: string) -> int32 {
+    return ctxReportError(subject, "unknown command \"" + word + "\" for \"" + (*subject).path + "\"")
+}
+
+/**
+ * novaExecute
+ * Fixes up the tree, finds the command argv names, parses its flags and runs it
+ * @param rootc {*Command} - the root command of the tree
+ * @param argv {string[]} - the raw argv, argv[0] is the program name and is skipped
+ * @return the exit code, the handler's return, 0 after help or version, 1 on a usage error
+ **/
+export func novaExecute(rootc: *Command, argv: string[]) -> int32 {
+    // Fix up the tree before scanning
+    execFixup(rootc)
+
+    // Run both passes of the scanner
+    st: *ParseState = parseStateNew(rootc, argv)
+    parseFind(st)
+    perr: error = parseAll(st)
+
+    // The chain, positionals and the command found
+    chain: *Vector<*Command> = (*st).chain
+    pos: *Vector<string> = (*st).pos
+    curc: *Command = parseCur(st)
+
+    // Report a flag error
+    if perr.exists() {
+        return ctxReportError(curc, perr.message)
+    }
+
+    // Print help when it was asked for
+    if (*st).helpRequested {
+        helpPrint(curc, chain)
+        return 0
+    }
+
+    // Print the version when it was asked for
+    if execVersionRequested(rootc, vec_len(chain)) {
+        v: string = novaVersionString(rootc)
+        println(v)
+        free(v)
+        return 0
+    }
+
+    // A command without a run either has an unknown word or prints its help
+    if !(*curc).hasRun {
+        if vec_len(pos) > 0 {
+            return execUnknownCommand(curc, vec_get(pos, 0))
+        }
+        helpPrint(curc, chain)
+        return 0
+    }
+
+    // Warn when the command is deprecated
+    if (*curc).deprecated != "" {
+        printerr("Command \"" + (*curc).name + "\" is deprecated, " + (*curc).deprecated)
+    }
+
+    // Check the required flags, the builtin commands are skipped
+    if !(*curc).isBuiltin {
+        rerr: error = execCheckRequired(chain)
+        if rerr.exists() {
+            return ctxReportError(curc, rerr.message)
+        }
+    }
+
+    // The first positional if any
+    mut first: string = ""
+    if vec_len(pos) > 0 {
+        first = vec_get(pos, 0)
+    }
+
+    // Validate the positionals against the command's args rule
+    aerr: error = argsValidateFirst((*curc).args, vec_len(pos), first, (*curc).path)
+    if aerr.exists() {
+        return ctxReportError(curc, aerr.message)
+    }
+
+    // Build the context and run the hooks
+    ctx: *Context = alloc(Context { cmd: curc, root: rootc, chain: chain, args: pos, argv: argv })
+    return execRunHooks(ctx)
+}

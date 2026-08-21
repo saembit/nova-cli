@@ -1,0 +1,2 @@
+Error: invalid argument "maybe" for "--shout" flag: expected a boolean
+Run 'hello --help' for usage.

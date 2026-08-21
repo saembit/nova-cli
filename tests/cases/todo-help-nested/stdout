@@ -1,0 +1,10 @@
+Set a configuration value
+
+Usage:
+  todo config set [flags]
+
+Flags:
+  -h, --help   help for set
+
+Global Flags:
+  -v, --verbose   verbose output

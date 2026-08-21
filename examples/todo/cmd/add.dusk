@@ -1,0 +1,77 @@
+// todo add <text...> joins every positional argument into one item.
+@paradigm procedural
+
+// The command type, the run context and the argument rules
+@import nova.command
+@import nova.context
+@import nova.args
+
+// StringBuilder
+@import std.string
+
+/**
+ * runAdd
+ * Joins the positional arguments with single spaces and prints the item that would be added
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runAdd(ctx: *Context) -> int32 {
+    // The number of words the parser collected
+    n: int64 = ctx.nargs()
+
+    // Check if the root's persistent --verbose was passed, then say what is about to happen
+    if ctx.getBool("verbose") {
+        println("verbose: joining {} word(s)", n)
+    }
+
+    // Builder the item text is assembled in
+    sb: *StringBuilder = alloc(sb_new())
+
+    // Index of the current word
+    mut i: int64 = 0
+
+    // Loop iterating through the words
+    while i < n {
+        // Separate every word after the first with a space
+        if i > 0 {
+            sb_push(sb, " ")
+        }
+
+        // Append the current word
+        sb_push(sb, ctx.arg(i))
+
+        // Move to the next word
+        i = i + 1
+    }
+
+    // The finished item text
+    text: string = sb_cstr(sb)
+
+    // Nothing is persisted, so just report what would have been added
+    println("added: " + text)
+
+    // Adding cannot fail
+    return 0
+}
+
+/**
+ * addCmd
+ * Builds the add command, which needs at least one word of item text
+ * @return *Command - the add subcommand
+ **/
+export func addCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("add", "Add a todo item")
+
+    // The long description shown by todo add --help
+    c.setLong("Add a todo item.\n\nEvery word after the command is joined with single spaces to form\nthe item text.")
+
+    // At least one positional argument, otherwise there is no item to add
+    c.setArgs(argsMin(1))
+
+    // The handler
+    c.setRun(runAdd)
+
+    // Hand the finished command back to the caller
+    return c
+}

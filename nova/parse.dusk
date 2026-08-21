@@ -1,0 +1,440 @@
+/**
+ * nova/parse.dusk
+ * The two pass argv scanner novaExecute drives, pass 1 finds the command, pass 2 parses the flags
+ **/
+@paradigm oop
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import flagset
+@import text
+@import command
+@import context
+
+/**
+ * ParseState
+ * The scanner state for one novaExecute call, parseFind fills chain and toks, parseAll fills pos and helpRequested
+ **/
+export struct ParseState {
+    chain: *Vector<*Command>,
+    pos: *Vector<string>,
+    argv: string[],
+    toks: *Vector<string>,
+    i: int64,
+    helpRequested: bool,
+    stopFlags: bool,
+}
+
+/**
+ * parseStateNew
+ * Builds a fresh scanner with the root as the only chain entry
+ * @param rootc {*Command} - the root command
+ * @param argv {string[]} - the raw argv, argv[0] is the program name
+ * @return the new state on the heap
+ **/
+export func parseStateNew(rootc: *Command, argv: string[]) -> *ParseState {
+    // The chain of commands matched so far, starting at the root
+    chain: *Vector<*Command> = alloc(vec_new())
+    vec_push(chain, rootc)
+
+    // The positionals and the tokens pass 2 will parse
+    pos: *Vector<string> = alloc(vec_new())
+    toks: *Vector<string> = alloc(vec_new())
+
+    // Return the state on the heap
+    return alloc(ParseState {
+        chain: chain, pos: pos, argv: argv, toks: toks, i: 0,
+        helpRequested: false, stopFlags: false,
+    })
+}
+
+/**
+ * parseCur
+ * Gets the deepest command found so far, the last chain entry
+ * @param st {*ParseState} - the scanner
+ * @return the command at the end of the chain
+ **/
+export func parseCur(st: *ParseState) -> *Command {
+    // The chain in the state
+    chain: *Vector<*Command> = (*st).chain
+
+    // Return the last entry
+    return vec_get(chain, vec_len(chain) - 1)
+}
+
+/**
+ * parseFindLongTakesValue
+ * Checks if a long token in pass 1 takes the next token as its value
+ * @param chain {*Vector<*Command>} - the commands matched so far
+ * @param tok {string} - the long flag token
+ * @return true when the flag is unknown or not a bool
+ **/
+func parseFindLongTakesValue(chain: *Vector<*Command>, tok: string) -> bool {
+    // A token with "=" already carries its value
+    if str_contains(tok, "=") {
+        return false
+    }
+
+    // The flag name after the dashes
+    name: string = substring(tok, 2, str_len(tok))
+
+    // Look the name up on the chain
+    fset, idx, found := ctxLookupChain(chain, name)
+
+    // An unknown flag takes a value unless it is help
+    if !found {
+        return name != "help"
+    }
+
+    // The flag the name resolved to
+    f: *Flag = fset.get(idx)
+
+    // Only a non bool flag takes a value
+    return !flagKindEq((*f).kind, FlagKind.KBool)
+}
+
+/**
+ * parseFindShortTakesValue
+ * Checks if a short token in pass 1 takes the next token as its value
+ * @param chain {*Vector<*Command>} - the commands matched so far
+ * @param tok {string} - the short flag token
+ * @return true when the token is two bytes and its shorthand is unknown or not a bool
+ **/
+func parseFindShortTakesValue(chain: *Vector<*Command>, tok: string) -> bool {
+    // Only a two byte token can take the next token
+    if str_len(tok) != 2 {
+        return false
+    }
+
+    // The shorthand letter
+    ch: string = textCharAt(tok, 1)
+
+    // Look the shorthand up on the chain
+    fset, idx, found := ctxLookupShortChain(chain, ch)
+
+    // An unknown shorthand takes a value unless it is h
+    if !found {
+        return ch != "h"
+    }
+
+    // The flag the shorthand resolved to
+    f: *Flag = fset.get(idx)
+
+    // Only a non bool flag takes a value
+    return !flagKindEq((*f).kind, FlagKind.KBool)
+}
+
+/**
+ * parseFind
+ * Pass 1, walks argv[1..] from the root and descends into each child a word names, every other token goes to the token list
+ * @param st {*ParseState} - the scanner
+ * @return ...
+ **/
+export func parseFind(st: *ParseState) -> void {
+    // The argv, chain and token list in the state
+    argv: string[] = (*st).argv
+    chain: *Vector<*Command> = (*st).chain
+    toks: *Vector<string> = (*st).toks
+
+    // Whether we are still matching command words
+    mut descending: bool = true
+
+    // Loop over the tokens after the program name
+    mut i: int64 = 1
+    while i < argv.len {
+        // The current token
+        tok: string = argv[i]
+        i = i + 1
+
+        // Once descending stops every token is kept for pass 2
+        if !descending {
+            vec_push(toks, tok)
+            continue
+        }
+
+        // The deepest command so far
+        curc: *Command = parseCur(st)
+
+        // A command without flag parsing or a "--" ends the walk
+        if (*curc).disableFlagParsing || tok == "--" {
+            descending = false
+            vec_push(toks, tok)
+            continue
+        }
+
+        // A long flag is kept, along with its value token when it takes one
+        if textIsLongFlag(tok) {
+            vec_push(toks, tok)
+            if parseFindLongTakesValue(chain, tok) && i < argv.len {
+                vec_push(toks, argv[i])
+                i = i + 1
+            }
+            continue
+        }
+
+        // A short flag is kept, along with its value token when it takes one
+        if textIsShortFlag(tok) {
+            vec_push(toks, tok)
+            if parseFindShortTakesValue(chain, tok) && i < argv.len {
+                vec_push(toks, argv[i])
+                i = i + 1
+            }
+            continue
+        }
+
+        // Descend into the child the word names
+        j: int64 = curc.findChild(tok)
+        if j >= 0 {
+            vec_push(chain, curc.child(j))
+            continue
+        }
+
+        // The first word naming no child stops the walk
+        descending = false
+        vec_push(toks, tok)
+    }
+}
+
+// Prints the deprecation warning when the flag carries a message
+func parseWarnDeprecated(f: *Flag) -> void {
+    // Print the warning to stderr
+    if (*f).deprecated != "" {
+        printerr("Flag --" + (*f).name + " has been deprecated, " + (*f).deprecated)
+    }
+}
+
+// Takes the next token as a flag value, false when the tokens are used up
+func parseTakeNext(st: *ParseState) -> (string, bool) {
+    // The token list and the cursor
+    toks: *Vector<string> = (*st).toks
+    i: int64 = (*st).i
+
+    // No token left
+    if i >= vec_len(toks) {
+        return ("", false)
+    }
+
+    // Move the cursor and return the token
+    (*st).i = i + 1
+    return (vec_get(toks, i), true)
+}
+
+/**
+ * parseHelpFlag
+ * Records a --help request, bare means true, "=value" is parsed as a bool
+ * @param st {*ParseState} - the scanner
+ * @param val {string} - the value after "=" if any
+ * @param hadEq {bool} - whether the token had an "="
+ * @return a clean error or the invalid argument error
+ **/
+func parseHelpFlag(st: *ParseState, val: string, hadEq: bool) -> error {
+    // A bare --help is a request
+    if !hadEq {
+        (*st).helpRequested = true
+        return error {}
+    }
+
+    // Parse the value as a bool
+    b, e := flagParseBool(val)
+    if e.exists() {
+        q: string = textQuote(val)
+        return error { message: "invalid argument " + q + " for \"--help\" flag: expected a boolean" }
+    }
+
+    // Record the parsed value
+    (*st).helpRequested = b
+    return error {}
+}
+
+/**
+ * parseLongFlag
+ * Consumes one long flag token, "--name" or "--name=value", taking the next token as the value when needed
+ * @param st {*ParseState} - the scanner
+ * @param tok {string} - the token, starts with "--" and is longer than 2 bytes
+ * @return a clean error, or the bad flag syntax, unknown flag, flag needs an argument or invalid argument error
+ **/
+export func parseLongFlag(st: *ParseState, tok: string) -> error {
+    // A name starting with "-" or "=" is bad syntax
+    if tok[2] == 45 || tok[2] == 61 {
+        return error { message: "bad flag syntax: " + tok }
+    }
+
+    // Split the body into name and value
+    body: string = substring(tok, 2, str_len(tok))
+    name, val, hadEq := textSplitEq(body)
+
+    // Look the name up on the chain
+    chain: *Vector<*Command> = (*st).chain
+    fset, idx, found := ctxLookupChain(chain, name)
+
+    // An unknown name is the help request or an error
+    if !found {
+        if name == "help" {
+            return parseHelpFlag(st, val, hadEq)
+        }
+        return error { message: "unknown flag: --" + name }
+    }
+
+    // The flag the name resolved to
+    f: *Flag = fset.get(idx)
+
+    // A bool flag is set on, or set from its "=value"
+    if flagKindEq((*f).kind, FlagKind.KBool) {
+        if hadEq {
+            e: error = fset.setValue(idx, val)
+            if e.exists() {
+                return e
+            }
+        } else {
+            fset.setBoolOn(idx)
+        }
+        parseWarnDeprecated(f)
+        return error {}
+    }
+
+    // The raw value, taken from the next token when none was attached
+    mut raw: string = val
+    if !hadEq {
+        nxt, ok := parseTakeNext(st)
+        if !ok {
+            return error { message: "flag needs an argument: --" + name }
+        }
+        raw = nxt
+    }
+
+    // Set the value on the flag
+    e2: error = fset.setValue(idx, raw)
+    if e2.exists() {
+        return e2
+    }
+
+    // Warn when the flag is deprecated
+    parseWarnDeprecated(f)
+    return error {}
+}
+
+/**
+ * parseShortCluster
+ * Consumes one short flag token or cluster such as "-v", "-abc", "-p8080", "-p=8080", "-p 8080"
+ * @param st {*ParseState} - the scanner
+ * @param tok {string} - the token, starts with "-" followed by a non dash non digit
+ * @return a clean error, or the unknown shorthand flag, flag needs an argument or invalid argument error
+ **/
+export func parseShortCluster(st: *ParseState, tok: string) -> error {
+    // The token length and the chain
+    n: int64 = str_len(tok)
+    chain: *Vector<*Command> = (*st).chain
+
+    // Loop over the letters after the dash
+    mut k: int64 = 1
+    while k < n {
+        // The current shorthand letter
+        ch: string = textCharAt(tok, k)
+
+        // Look the shorthand up on the chain
+        fset, idx, found := ctxLookupShortChain(chain, ch)
+
+        // An unknown shorthand is the help request or an error
+        if !found {
+            if ch == "h" {
+                (*st).helpRequested = true
+                k = k + 1
+                continue
+            }
+            return error { message: "unknown shorthand flag: '" + ch + "' in -" + substring(tok, k, n) }
+        }
+
+        // The flag the shorthand resolved to
+        f: *Flag = fset.get(idx)
+
+        // A bool flag is set on and the cluster goes on
+        if flagKindEq((*f).kind, FlagKind.KBool) {
+            fset.setBoolOn(idx)
+            parseWarnDeprecated(f)
+            k = k + 1
+            continue
+        }
+
+        // The raw value, the rest of the cluster or the next token
+        mut raw: string = ""
+        if k + 1 < n {
+            if tok[k + 1] == 61 {
+                raw = substring(tok, k + 2, n)
+            } else {
+                raw = substring(tok, k + 1, n)
+            }
+        } else {
+            nxt, ok := parseTakeNext(st)
+            if !ok {
+                return error { message: "flag needs an argument: '" + ch + "' in -" + substring(tok, k, n) }
+            }
+            raw = nxt
+        }
+
+        // Set the value on the flag
+        e: error = fset.setValue(idx, raw)
+        if e.exists() {
+            return e
+        }
+
+        // Warn when the flag is deprecated and end the cluster
+        parseWarnDeprecated(f)
+        k = n
+    }
+    return error {}
+}
+
+/**
+ * parseAll
+ * Pass 2, parses every token parseFind left against the leaf's flags, the rest are positionals
+ * @param st {*ParseState} - the scanner, after parseFind
+ * @return a clean error or the first flag error met
+ **/
+export func parseAll(st: *ParseState) -> error {
+    // The token list, positionals and the leaf command
+    toks: *Vector<string> = (*st).toks
+    pos: *Vector<string> = (*st).pos
+    leaf: *Command = parseCur(st)
+
+    // Loop over the tokens from the cursor
+    while (*st).i < vec_len(toks) {
+        // The current token
+        tok: string = vec_get(toks, (*st).i)
+        (*st).i = (*st).i + 1
+
+        // Every token is a positional once flag parsing is off
+        if (*leaf).disableFlagParsing || (*st).stopFlags {
+            vec_push(pos, tok)
+            continue
+        }
+
+        // A "--" ends flag parsing
+        if tok == "--" {
+            (*st).stopFlags = true
+            continue
+        }
+
+        // Parse a long flag
+        if textIsLongFlag(tok) {
+            e: error = parseLongFlag(st, tok)
+            if e.exists() {
+                return e
+            }
+            continue
+        }
+
+        // Parse a short flag or cluster
+        if textIsShortFlag(tok) {
+            e2: error = parseShortCluster(st, tok)
+            if e2.exists() {
+                return e2
+            }
+            continue
+        }
+
+        // Anything else is a positional
+        vec_push(pos, tok)
+    }
+    return error {}
+}

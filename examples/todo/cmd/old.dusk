@@ -1,0 +1,43 @@
+// A deprecated command, still runnable, warns on stderr and hidden from help.
+@paradigm procedural
+
+// The command type, the run context and the argument rules
+@import nova.command
+@import nova.context
+@import nova.args
+
+/**
+ * runOld
+ * Prints one line so it is clear the deprecated command still works
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runOld(ctx: *Context) -> int32 {
+    // The deprecation warning nova prints ahead of this goes to stderr
+    println("old: still works")
+
+    // Deprecated is not broken
+    return 0
+}
+
+/**
+ * oldCmd
+ * Builds the old command and marks it deprecated in favour of list
+ * @return *Command - the old subcommand
+ **/
+export func oldCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("old", "The old way to list items")
+
+    // The message nova prints on stderr before every run, which also hides it from help
+    c.setDeprecated("use \"list\" instead")
+
+    // old takes no positional arguments
+    c.setArgs(argsNone())
+
+    // The handler
+    c.setRun(runOld)
+
+    // Hand the finished command back to the caller
+    return c
+}

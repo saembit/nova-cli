@@ -1,0 +1,311 @@
+// Unit test root for nova/flagset.dusk, nova/args.dusk and nova/text.dusk.
+// Run it with cd tests/unit && dusk run flagset_test.dusk | diff - flagset_test.expected,
+// every line printed here is pinned by that expected file.
+@paradigm oop
+@paradigm procedural
+
+// Stdlib pieces the assertions lean on
+@import std.string
+@import std.vector
+
+// The three nova modules under test
+@import nova.flagset
+@import nova.args
+@import nova.text
+
+/**
+ * showErr
+ * Prints one line for a fallible call, either its error message or ok
+ * @param label {string} - the name the call is reported under
+ * @param e {error} - the error the call returned, possibly a clean one
+ * @return void
+ **/
+func showErr(label: string, e: error) -> void {
+    // Check if the call failed, then print the message it carried
+    if e.exists() {
+        println("{}: err: {}", label, e.message)
+    } else {
+        println("{}: ok", label)
+    }
+}
+
+/**
+ * showBoolParse
+ * Prints what flagParseBool made of one raw string
+ * @param raw {string} - the text being parsed as a bool
+ * @return void
+ **/
+func showBoolParse(raw: string) -> void {
+    // The parsed value, plus the error an unrecognised spelling produces
+    b, e := flagParseBool(raw)
+
+    // Check if the spelling was rejected, then print the message instead of a value
+    if e.exists() {
+        println("parse_bool {} -> err: {}", raw, e.message)
+    } else {
+        println("parse_bool {} -> {}", raw, textBool(b))
+    }
+}
+
+/**
+ * testFlagset
+ * Exercises a FlagSet end to end, from declaration through lookup, set, reset and the marks
+ * @return void
+ **/
+func testFlagset() -> void {
+    // A fresh empty set
+    fs: *FlagSet = flagsetNew()
+
+    // Four flags, one of every kind plus a long only one
+    fs.addBool("verbose", "v", false, "verbose output")
+    fs.addStr("name", "n", "world", "who to greet")
+    fs.addInt("port", "p", 8080, "port to listen on")
+    fs.addStr("config", "", "", "config file")
+
+    // How many flags the set holds
+    println("len {}", fs.len())
+
+    // Lookup by long name, where a miss gives -1
+    println("find verbose {} name {} port {} config {} nope {}", fs.find("verbose"), fs.find("name"), fs.find("port"), fs.find("config"), fs.find("nope"))
+
+    // Lookup by shorthand, where the empty shorthand must never match the long only flag
+    println("findShort v {} n {} p {} x {} empty {}", fs.findShort("v"), fs.findShort("n"), fs.findShort("p"), fs.findShort("x"), fs.findShort(""))
+
+    // The bool form of the same lookup
+    println("has port {} has nope {}", textBool(fs.has("port")), textBool(fs.has("nope")))
+
+    // Every flag still reads back its declared default
+    println("defaults verbose={} name={} port={} config=[{}]", textBool(fs.getBool("verbose")), fs.getStr("name"), fs.getInt("port"), fs.getStr("config"))
+
+    // Nothing has been set yet, so nothing counts as changed
+    println("changed before: {} {} {}", textBool(fs.changed("verbose")), textBool(fs.changed("name")), textBool(fs.changed("port")))
+
+    // The int flag, reached by index instead of by name
+    f: *Flag = fs.get(2)
+
+    // Every field of that flag, straight off the struct
+    println("get(2) name={} short={} kind={} help={} defI={}", (*f).name, (*f).short, flagKindWord((*f).kind), (*f).help, (*f).defI)
+
+    // The bool flag, kept around for the unmarked comparison further down
+    f0: *Flag = fs.get(0)
+
+    // The word each kind prints as
+    println("kind words: bool=[{}] str=[{}] int=[{}]", flagKindWord((*f0).kind), flagKindWord((*(fs.get(1))).kind), flagKindWord((*f).kind))
+
+    // Enums have no ==, so kinds compare through the helper
+    println("kind_eq bool/bool {} bool/int {}", textBool(flagKindEq(FlagKind.KBool, FlagKind.KBool)), textBool(flagKindEq(FlagKind.KBool, FlagKind.KInt)))
+
+    // Setting a bool to its default value still marks it changed
+    showErr("set bool false", fs.setValue(0, "false"))
+    println("verbose={} changed={}", textBool(fs.getBool("verbose")), textBool(fs.changed("verbose")))
+
+    // Case does not matter to the bool spellings
+    showErr("set bool YES", fs.setValue(0, "YES"))
+    println("verbose={}", textBool(fs.getBool("verbose")))
+
+    // A spelling that is not a bool at all
+    showErr("set bool maybe", fs.setValue(0, "maybe"))
+
+    // A string flag takes whatever it is given
+    showErr("set str", fs.setValue(1, "dusk"))
+    println("name={} changed={}", fs.getStr("name"), textBool(fs.changed("name")))
+
+    // An int flag parses its value
+    showErr("set int", fs.setValue(2, "9090"))
+    println("port={} changed={}", fs.getInt("port"), textBool(fs.changed("port")))
+
+    // Negative numbers parse too
+    showErr("set int neg", fs.setValue(2, "-5"))
+    println("port={}", fs.getInt("port"))
+
+    // A rejected value must leave the previous one in place
+    showErr("set int bad", fs.setValue(2, "abc"))
+    println("port after bad={}", fs.getInt("port"))
+
+    // Put every flag back to its default
+    fs.reset()
+
+    // The values are the declared ones again
+    println("after reset verbose={} name={} port={}", textBool(fs.getBool("verbose")), fs.getStr("name"), fs.getInt("port"))
+
+    // And the changed marks are cleared with them
+    println("changed after reset: {} {} {}", textBool(fs.changed("verbose")), textBool(fs.changed("name")), textBool(fs.changed("port")))
+
+    // The shorthand path the parser uses for a bool with no value attached
+    fs.setBoolOn(0)
+    println("setBoolOn verbose={} changed={}", textBool(fs.getBool("verbose")), textBool(fs.changed("verbose")))
+
+    // The three marks, each on a different flag
+    fs.markRequired("name")
+    fs.markHidden("config")
+    fs.markDeprecated("port", "use --listen instead")
+
+    // The string flag and the long only one, so each mark can be read back
+    f1: *Flag = fs.get(1)
+    f3: *Flag = fs.get(3)
+
+    // Each mark landed on the flag it named
+    println("marks required={} hidden={} deprecated=[{}]", textBool((*f1).required), textBool((*f3).hidden), (*f).deprecated)
+
+    // And the untouched bool flag carries none of them
+    println("unmarked required={} hidden={} deprecated=[{}]", textBool((*f0).required), textBool((*f0).hidden), (*f0).deprecated)
+}
+
+/**
+ * testBoolParse
+ * Runs every bool spelling flagParseBool accepts, plus three it does not
+ * @return void
+ **/
+func testBoolParse() -> void {
+    // The true spellings, upper and lower case
+    showBoolParse("true")
+    showBoolParse("True")
+    showBoolParse("1")
+    showBoolParse("t")
+    showBoolParse("yes")
+    showBoolParse("Y")
+
+    // The false spellings, the same way
+    showBoolParse("false")
+    showBoolParse("FALSE")
+    showBoolParse("0")
+    showBoolParse("F")
+    showBoolParse("no")
+    showBoolParse("n")
+
+    // The rejected ones, including the empty string
+    showBoolParse("")
+    showBoolParse("2")
+    showBoolParse("yep")
+}
+
+/**
+ * testArgs
+ * Checks every ArgSpec against a count that satisfies it and counts that do not
+ * @return void
+ **/
+func testArgs() -> void {
+    // Any takes whatever it is handed
+    showErr("any 0", argsValidate(argsAny(), 0, "app"))
+    showErr("any 5", argsValidate(argsAny(), 5, "app"))
+
+    // None takes nothing, and names the offending argument in the first form
+    showErr("none 0", argsValidate(argsNone(), 0, "app"))
+    showErr("none 1", argsValidate(argsNone(), 1, "app"))
+    showErr("none first", argsValidateFirst(argsNone(), 1, "x", "app"))
+
+    // Exact rejects both too few and too many
+    showErr("exact 2/2", argsValidate(argsExact(2), 2, "app"))
+    showErr("exact 2/1", argsValidate(argsExact(2), 1, "app"))
+    showErr("exact 2/3", argsValidate(argsExact(2), 3, "app"))
+
+    // Min only has a floor
+    showErr("min 1/1", argsValidate(argsMin(1), 1, "app"))
+    showErr("min 1/0", argsValidate(argsMin(1), 0, "app"))
+
+    // Max only has a ceiling
+    showErr("max 1/1", argsValidate(argsMax(1), 1, "app"))
+    showErr("max 1/2", argsValidate(argsMax(1), 2, "app"))
+
+    // Range has both, inclusive at each end
+    showErr("range 1-3/2", argsValidate(argsRange(1, 3), 2, "app"))
+    showErr("range 1-3/0", argsValidate(argsRange(1, 3), 0, "app"))
+    showErr("range 1-3/4", argsValidate(argsRange(1, 3), 4, "app"))
+}
+
+/**
+ * showSplit
+ * Prints how textSplitEq divided one token at its first equals sign
+ * @param s {string} - the token being split
+ * @return void
+ **/
+func showSplit(s: string) -> void {
+    // The two halves, plus whether there was an equals sign at all
+    a, b, had := textSplitEq(s)
+
+    // Both halves are bracketed so an empty one is still visible
+    println("split_eq [{}] -> [{}] [{}] {}", s, a, b, textBool(had))
+}
+
+/**
+ * testText
+ * Exercises the small text helpers the help renderer and the parser share
+ * @return void
+ **/
+func testText() -> void {
+    // Padding a string shorter than the width, exactly as wide, and wider
+    println("pad [{}]", textPadRight("ab", 5))
+    println("pad same [{}]", textPadRight("abcde", 5))
+    println("pad longer [{}]", textPadRight("abcdefg", 5))
+    println("pad empty [{}]", textPadRight("", 3))
+
+    // The two bool words
+    println("bool {} {}", textBool(true), textBool(false))
+
+    // Quoting for the error messages
+    println("quote {}", textQuote("hi"))
+
+    // A vector the join is built up from, one element at a time
+    v: *Vector<string> = alloc(vec_new())
+
+    // Empty, one element, then three
+    println("join empty [{}]", textJoinQuoted(v, ", "))
+    vec_push(v, "a")
+    println("join one [{}]", textJoinQuoted(v, ", "))
+    vec_push(v, "b")
+    vec_push(v, "c")
+    println("join three [{}]", textJoinQuoted(v, ", "))
+
+    // A long flag needs two dashes and at least one more character, so bare -- is not one
+    println("is_long_flag --name {} -- {} -n {} --x {} name {}", textBool(textIsLongFlag("--name")), textBool(textIsLongFlag("--")), textBool(textIsLongFlag("-n")), textBool(textIsLongFlag("--x")), textBool(textIsLongFlag("name")))
+
+    // A short flag is one dash and a non digit, so a negative number is a value and not a flag
+    println("is_short_flag -n {} -abc {} - {} -- {} -5 {} --n {} n {}", textBool(textIsShortFlag("-n")), textBool(textIsShortFlag("-abc")), textBool(textIsShortFlag("-")), textBool(textIsShortFlag("--")), textBool(textIsShortFlag("-5")), textBool(textIsShortFlag("--n")), textBool(textIsShortFlag("n")))
+
+    // The equals forms, including a value that itself contains an equals sign and the empty halves
+    showSplit("name=value")
+    showSplit("name")
+    showSplit("a=b=c")
+    showSplit("=v")
+    showSplit("k=")
+
+    // Digits by byte value, 48 is 0 and 57 is 9 while 97 is a
+    println("is_digit 0 {} 9 {} a {}", textBool(textIsDigit(48)), textBool(textIsDigit(57)), textBool(textIsDigit(97)))
+
+    // One character out of a string, as a string
+    println("char_at [{}] [{}]", textCharAt("abc", 0), textCharAt("abc", 2))
+
+    // The shorthand length check, which only a single character passes
+    println("is_one_char a {} ab {} empty {}", textBool(textIsOneChar("a")), textBool(textIsOneChar("ab")), textBool(textIsOneChar("")))
+}
+
+/**
+ * main
+ * Runs the four groups of checks in order, each under its own banner
+ * @param argc {int32} - the argument count, unused here
+ * @param argv {string[]} - the raw command line, unused here
+ * @return int32 - 0, the diff against the expected file is what decides the result
+ **/
+func main(argc: int32, argv: string[]) -> int32 {
+    // The FlagSet group
+    println("== flagset ==")
+    testFlagset()
+
+    // The bool spellings
+    println("== bool parse ==")
+    testBoolParse()
+
+    // The positional argument rules
+    println("== args ==")
+    testArgs()
+
+    // The text helpers
+    println("== text ==")
+    testText()
+
+    // The marker the expected file ends on
+    println("done")
+
+    // The test harness compares output, so the exit code is always 0
+    return 0
+}

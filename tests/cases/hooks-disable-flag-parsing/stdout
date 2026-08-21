@@ -1,0 +1,8 @@
+root persistentPreRun
+arg: -x
+arg: --weird
+arg: --
+arg: a
+arg: b
+count: 5
+root persistentPostRun

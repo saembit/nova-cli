@@ -1,0 +1,851 @@
+/**
+ * cli/scaffold.dusk
+ * Every filesystem side effect nova-cli performs
+ *
+ * std only, no @import nova.*, so dusk check cli/scaffold.dusk type-checks it on its own
+ * while the library is still being written next door. The command handlers in
+ * cli/init_cmd.dusk and cli/add_cmd.dusk hold the nova types and call into here, this file
+ * never prints and never exits, it returns errors.
+ *
+ * Three things are shelled out, symlink creation since std.fs binds no symlink, resolving a
+ * symlink target with readlink -f on /proc/<pid>/exe to find the library beside the running
+ * binary, and dawn get, which operates on the project it is run inside and so has to be
+ * reached through a cd. Every argument goes through std.os quote first. Directory creation
+ * is make_dir applied to each path prefix in turn, so scaffoldMkdir is a real mkdir -p with
+ * no shell.
+ *
+ * Every export carries the scaffold prefix.
+ **/
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.fs
+@import std.os
+@import std.process
+
+/**
+ * scaffoldWalkLimit
+ * How far scaffoldFindNovaHome walks up before giving up
+ * @return the maximum number of parent steps
+ **/
+func scaffoldWalkLimit() -> int64 { return 64 }
+
+/**
+ * scaffoldTypeMask
+ * The POSIX mode bits that hold the file type, S_IFMT
+ * @return 0o170000 as a decimal int64
+ **/
+func scaffoldTypeMask() -> int64 { return 61440 }
+
+/**
+ * scaffoldDirBit
+ * The POSIX file type value that marks a directory, S_IFDIR
+ * @return 0o040000 as a decimal int64
+ **/
+func scaffoldDirBit() -> int64 { return 16384 }
+
+/**
+ * scaffoldIdent
+ * Turns a command name into a legal dusk identifier
+ * @param name {string} - the command name as the user typed it
+ * @return a fresh heap string holding a legal dusk identifier, "cmd" for an empty name
+ **/
+export func scaffoldIdent(name: string) -> string {
+    // Length of the name
+    n: int64 = str_len(name)
+
+    // An empty name has no characters to keep, so fall back to a fixed one
+    if n == 0 {
+        return "cmd"
+    }
+
+    // The builder the sanitized characters are pushed onto
+    b: *StringBuilder = alloc(sb_new())
+
+    // The first character, which decides whether a prefix is needed
+    first: char = name[0]
+
+    // A name starting with a digit gains a "c" in front so it parses as an identifier
+    if first >= 48 && first <= 57 {
+        sb_push_char(b, 99)
+    }
+
+    // Cursor over the name
+    mut i: int64 = 0
+
+    // Loop copying each character, replacing anything illegal with an underscore
+    while i < n {
+        // The current character
+        c: char = name[i]
+        // Whether it is a letter, a digit, or an underscore
+        keep: bool = (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 95
+        if keep {
+            sb_push_char(b, c)
+        } else {
+            sb_push_char(b, 95)
+        }
+        i = i + 1
+    }
+
+    // Copy the builder out before freeing it
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+
+    // The sanitized identifier
+    return out
+}
+
+/**
+ * scaffoldValidName
+ * Whether a name is safe as a file name, an identifier, and a generated string literal
+ * @param name {string} - the command or application name as the user typed it
+ * @return true when the name matches [A-Za-z][A-Za-z0-9_-]*
+ **/
+export func scaffoldValidName(name: string) -> bool {
+    // Length of the name
+    n: int64 = str_len(name)
+
+    // An empty name is never valid
+    if n == 0 {
+        return false
+    }
+
+    // The first character has to be a letter
+    first: char = name[0]
+    if !((first >= 97 && first <= 122) || (first >= 65 && first <= 90)) {
+        return false
+    }
+
+    // Whether every character seen so far is allowed
+    mut ok: bool = true
+    // Cursor over the rest of the name
+    mut i: int64 = 1
+
+    // Loop checking each remaining character against the allowed set
+    while i < n {
+        // The current character
+        c: char = name[i]
+        // Whether it is a letter, a digit, an underscore, or a dash
+        good: bool = (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 95 || c == 45
+        if !good {
+            ok = false
+        }
+        i = i + 1
+    }
+
+    // The verdict
+    return ok
+}
+
+/**
+ * scaffoldValidToken
+ * Whether a string is safe to write into package.dawn as one directive argument
+ * @param tok {string} - the source or reference as the user typed it
+ * @return true when the token is not empty and holds no whitespace, quote, or backslash
+ **/
+export func scaffoldValidToken(tok: string) -> bool {
+    // Length of the token
+    n: int64 = str_len(tok)
+
+    // An empty token would write an empty argument, which the manifest cannot express
+    if n == 0 {
+        return false
+    }
+
+    // Whether every character seen so far is allowed
+    mut ok: bool = true
+    // Cursor over the token
+    mut i: int64 = 0
+
+    // Loop rejecting control characters, spaces, quotes, and backslashes
+    while i < n {
+        // The current character
+        c: char = tok[i]
+        if c <= 32 || c == 34 || c == 92 || c == 127 {
+            ok = false
+        }
+        i = i + 1
+    }
+
+    // The verdict
+    return ok
+}
+
+/**
+ * ScaffoldStat
+ * A stat result that reports a missing path instead of failing
+ **/
+struct ScaffoldStat {
+    mode: int64,
+    found: bool
+}
+
+/**
+ * scaffoldStat
+ * Stats a path, reporting a missing one as found false rather than as an error
+ * @param path {string} - the path to stat
+ * @return the mode word and whether the path exists
+ **/
+func scaffoldStat(path: string) -> ScaffoldStat {
+    // Stat the path, keeping the error rather than returning it
+    st, e := file_stat(path)
+
+    // A failed stat is read as "not there"
+    if e.exists() {
+        return ScaffoldStat { mode: 0, found: false }
+    }
+
+    // The mode word of a path that is there
+    return ScaffoldStat { mode: st.mode, found: true }
+}
+
+/**
+ * scaffoldStatMode
+ * Reads a path's mode bits without treating a missing path as a failure
+ * @param path {string} - the path to stat
+ * @return the mode word paired with true, or 0 paired with false when the path is missing
+ **/
+export func scaffoldStatMode(path: string) -> (int64, bool) {
+    // Stat the path
+    s: ScaffoldStat = scaffoldStat(path)
+
+    // Split the struct back into the pair callers want
+    return (s.mode, s.found)
+}
+
+/**
+ * scaffoldExists
+ * Whether a path names anything at all, a file, a directory, or a symlink to either
+ * @param path {string} - the path to test
+ * @return true when the path exists
+ **/
+export func scaffoldExists(path: string) -> bool {
+    // Stat the path
+    s: ScaffoldStat = scaffoldStat(path)
+
+    // Existence is the whole answer
+    return s.found
+}
+
+/**
+ * scaffoldIsDir
+ * Whether a path names a directory
+ * @param path {string} - the path to test
+ * @return true when the path exists and its file type is a directory
+ **/
+export func scaffoldIsDir(path: string) -> bool {
+    // Stat the path
+    s: ScaffoldStat = scaffoldStat(path)
+
+    // Mask the mode down to the file type and compare it against S_IFDIR
+    return s.found && (s.mode & scaffoldTypeMask()) == scaffoldDirBit()
+}
+
+/**
+ * scaffoldMkdir
+ * Makes a directory and every missing parent, the mkdir -p contract
+ * @param path {string} - the directory path to make, absolute or relative
+ * @return an empty error on success, or the first make_dir failure encountered
+ **/
+export func scaffoldMkdir(path: string) -> error {
+    // An empty path names no directory to make
+    if str_len(path) == 0 {
+        return error { message: "scaffoldMkdir: empty path" }
+    }
+
+    // The path split into its components
+    parts: *Vector<string> = str_split(path, "/")
+    // How many components there are
+    n: int64 = vec_len(parts)
+
+    // The prefix built up so far
+    mut cur: string = ""
+    // Cursor over the components
+    mut i: int64 = 0
+    // The first failure, returned once the walk is done
+    mut failure: error = error {}
+    // Whether a failure has already been recorded
+    mut failed: bool = false
+
+    // Loop making each prefix of the path in turn
+    while i < n {
+        // The current component
+        part: string = vec_get(parts, i)
+        if str_len(part) == 0 {
+            // A leading empty component means the path was absolute
+            if i == 0 {
+                cur = "/"
+            }
+        } else {
+            // Append the component to the prefix, minding the root
+            if str_len(cur) == 0 {
+                cur = part
+            } else {
+                if str_eq(cur, "/") {
+                    cur = "/" + part
+                } else {
+                    cur = cur + "/" + part
+                }
+            }
+
+            // Make the prefix unless it is already a directory or the walk has failed
+            if !scaffoldIsDir(cur) && !failed {
+                e := make_dir(cur, mode_0755())
+                if e.exists() {
+                    failure = error { message: "mkdir " + cur + ": " + e.message }
+                    failed = true
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    // Empty when every level was made
+    return failure
+}
+
+/**
+ * scaffoldSymlink
+ * Makes a symlink by shelling out to ln -s, since std.fs binds no symlink
+ * @param target {string} - the path the link points at, written verbatim into the link
+ * @param linkPath {string} - the link to make
+ * @return an empty error on success, or one naming the failed command
+ **/
+export func scaffoldSymlink(target: string, linkPath: string) -> error {
+    // An existing link is left alone, so a second init over the same directory is harmless
+    if scaffoldExists(linkPath) {
+        return error {}
+    }
+
+    // The shell command, with both paths quoted so they read as literal words
+    cmd: string = "ln -s " + quote(target) + " " + quote(linkPath)
+    // Run it and keep the exit status
+    code: int64 = run(cmd)
+
+    // A non-zero status is reported with the command that produced it
+    if code != 0 {
+        return error { message: "ln -s " + target + " " + linkPath + " failed with code " + int_to_string(code) }
+    }
+
+    // Empty on success
+    return error {}
+}
+
+/**
+ * scaffoldSymlinkAbs
+ * Makes a symlink whose target is the absolute form of a directory, what --link needs
+ * @param target {string} - the directory the link points at, resolved to absolute first
+ * @param linkPath {string} - the link to make
+ * @return an empty error on success, one naming the missing target, or one naming the
+ * failed command
+ **/
+export func scaffoldSymlinkAbs(target: string, linkPath: string) -> error {
+    // An existing link is left alone
+    if scaffoldExists(linkPath) {
+        return error {}
+    }
+
+    // Linking to a missing directory would leave a dangling link that only fails at build time
+    if !scaffoldIsDir(target) {
+        return error { message: "no such directory: " + target }
+    }
+
+    // The directory holding the target, which the shell resolves to absolute
+    dir: string = path_dirname(target)
+    // The target's own last component, appended after the resolved directory
+    base: string = path_basename(target)
+
+    // The shell command, since std binds no realpath and no getcwd
+    cmd: string = "ln -s \"$(cd -- " + quote(dir) + " && pwd)\"/" + quote(base) + " " + quote(linkPath)
+    // Run it and keep the exit status
+    code: int64 = run(cmd)
+
+    // A non-zero status is reported with the command that produced it
+    if code != 0 {
+        return error { message: "ln -s " + target + " " + linkPath + " failed with code " + int_to_string(code) }
+    }
+
+    // Empty on success
+    return error {}
+}
+
+/**
+ * scaffoldCopyDir
+ * Copies every .dusk file directly inside one directory into another
+ * @param src {string} - the directory to read, for instance <NOVA_HOME>/nova
+ * @param dst {string} - the directory to write, for instance <project>/nova
+ * @return an empty error on success, or the first read, write, or mkdir failure
+ **/
+export func scaffoldCopyDir(src: string, dst: string) -> error {
+    // Nothing to copy when the source is not a directory
+    if !scaffoldIsDir(src) {
+        return error { message: "no such directory: " + src }
+    }
+
+    // Make the destination before writing into it
+    me := scaffoldMkdir(dst)
+    if me.exists() {
+        return me
+    }
+
+    // Open the source directory for reading
+    d, oe := dir_open(src)
+    if oe.exists() {
+        return error { message: "cannot read directory " + src + ": " + oe.message }
+    }
+
+    // Whether there are more entries to read
+    mut going: bool = true
+    // The first failure, returned once the directory is drained
+    mut failure: error = error {}
+    // Whether a failure has already been recorded
+    mut failed: bool = false
+
+    // Loop over every entry in the source directory
+    while going {
+        // The next entry name, paired with whether there was one
+        name, found := dir_next(d)
+        if !found {
+            going = false
+        } else {
+            // Subdirectories are skipped, the library is a flat directory of dusk files
+            if ends_with(name, ".dusk") && !failed {
+                // Where the file is read from
+                from: string = path_join(src, name)
+                // Where it is written to
+                to: string = path_join(dst, name)
+
+                // Read the whole file
+                text, re := read_file(from)
+                if re.exists() {
+                    failure = error { message: "cannot read " + from + ": " + re.message }
+                    failed = true
+                } else {
+                    // Write it out, overwriting so re-vendoring picks up a newer library
+                    we := write_file(to, text)
+                    if we.exists() {
+                        failure = error { message: "cannot write " + to + ": " + we.message }
+                        failed = true
+                    }
+                }
+            }
+        }
+    }
+
+    // Close the directory, the close failure tells the caller nothing useful
+    ce := dir_close(d)
+    ce.ignore()
+
+    // Empty when every file copied
+    return failure
+}
+
+/**
+ * scaffoldDawnGet
+ * Runs dawn get inside a project directory, which fills dawn_modules and writes dawn.lock
+ * @param dir {string} - the project directory, which must already hold a package.dawn
+ * @return dawn's stdout paired with true when it exited 0, or with false otherwise
+ **/
+export func scaffoldDawnGet(dir: string) -> (string, bool) {
+    // Every dawn command operates on a project, so the only way to aim it is to cd there
+    cmd: string = "cd " + quote(dir) + " && dawn get"
+
+    // Capture the output rather than inherit stdout, so the caller can print it in order
+    out, code, e := run_capture(cmd)
+
+    // A dawn that could not be run reads the same as one that failed
+    if e.exists() {
+        e.ignore()
+        return ("", false)
+    }
+
+    // The output paired with whether the fetch worked
+    return (out, code == 0)
+}
+
+/**
+ * scaffoldWriteIfAbsent
+ * Writes a file unless something is already there, the whole overwrite policy
+ * @param path {string} - the file to write
+ * @param text {string} - the contents to write
+ * @return true paired with the write's error when the file was absent, or false paired with
+ * an empty error when the path already existed
+ **/
+export func scaffoldWriteIfAbsent(path: string, text: string) -> (bool, error) {
+    // A file a user may have edited is never clobbered
+    if scaffoldExists(path) {
+        return (false, error {})
+    }
+
+    // The directory the file goes in
+    parent: string = path_dirname(path)
+
+    // Make that directory when the path actually has one
+    if str_len(parent) > 0 && !str_eq(parent, path) {
+        me := scaffoldMkdir(parent)
+        if me.exists() {
+            return (false, me)
+        }
+    }
+
+    // Write the file
+    we := write_file(path, text)
+    if we.exists() {
+        return (false, error { message: "cannot write " + path + ": " + we.message })
+    }
+
+    // Written
+    return (true, error {})
+}
+
+/**
+ * scaffoldFindNovaHome
+ * Locates the directory that holds the nova library to vendor or link
+ * @param argv0 {string} - the running binary's path, argv[0]
+ * @return the directory that contains nova/, or "." when nothing better is found
+ **/
+export func scaffoldFindNovaHome(argv0: string) -> string {
+    // NOVA_HOME wins whenever it is set
+    fromEnv: string = env("NOVA_HOME")
+    if str_len(fromEnv) > 0 {
+        return fromEnv
+    }
+
+    // The running binary's own path, which survives being invoked through PATH
+    exe, haveExe := scaffoldSelfExe()
+
+    // Walk up from the binary looking for a directory that holds nova/
+    if haveExe {
+        nearExe, ok := scaffoldWalkForNova(path_dirname(exe))
+        if ok {
+            return nearExe
+        }
+    }
+
+    // Walk up from argv[0] instead, the fallback for a system with no /proc
+    nearArgv, ok2 := scaffoldWalkForNova(path_dirname(argv0))
+    if ok2 {
+        return nearArgv
+    }
+
+    // The current directory, the last thing left to try
+    return "."
+}
+
+/**
+ * scaffoldSelfExe
+ * Reads the running binary's own absolute path out of /proc
+ * @return the path paired with true, or "" paired with false when /proc is absent or the
+ * command failed
+ **/
+func scaffoldSelfExe() -> (string, bool) {
+    // run_capture runs a child shell, so /proc/self would be readlink, and $PPID is us
+    out, code, e := run_capture("readlink -f /proc/$PPID/exe")
+
+    // A command that could not be run answers nothing
+    if e.exists() {
+        return ("", false)
+    }
+
+    // A non-zero status answers nothing either
+    if code != 0 {
+        return ("", false)
+    }
+
+    // The path readlink printed, without its newline
+    p: string = trim(out)
+
+    // An empty or missing path is no answer
+    if str_len(p) == 0 || !scaffoldExists(p) {
+        return ("", false)
+    }
+
+    // The binary's absolute path
+    return (p, true)
+}
+
+/**
+ * scaffoldWalkForNova
+ * Walks from a directory up toward the root looking for one that holds nova/command.dusk
+ * @param start {string} - the directory to begin at, "" is read as "."
+ * @return the directory paired with true, or "" paired with false
+ **/
+func scaffoldWalkForNova(start: string) -> (string, bool) {
+    // The directory currently being looked at
+    mut cur: string = start
+
+    // An empty start means the current directory
+    if str_len(cur) == 0 {
+        cur = "."
+    }
+
+    // How many levels have been climbed
+    mut steps: int64 = 0
+    // The directory that held the library
+    mut answer: string = ""
+    // Whether it was found
+    mut found: bool = false
+    // Whether there is anywhere left to look
+    mut searching: bool = true
+
+    // Loop climbing one level at a time until the library turns up or the walk runs out
+    while searching {
+        // The file whose presence marks the library's parent directory
+        probe: string = path_join(cur, "nova/command.dusk")
+        if scaffoldExists(probe) {
+            answer = cur
+            found = true
+            searching = false
+        } else {
+            // Stop rather than climb forever through a symlink loop
+            if steps >= scaffoldWalkLimit() {
+                searching = false
+            } else {
+                steps = steps + 1
+                cur = scaffoldParentOf(cur)
+                if str_len(cur) == 0 {
+                    searching = false
+                }
+            }
+        }
+    }
+
+    // The directory paired with whether the walk found one
+    return (answer, found)
+}
+
+/**
+ * scaffoldParentOf
+ * One step up from a directory, in the textual sense the walk needs
+ * @param dir {string} - the directory to ascend from
+ * @return the parent path, or "" when there is nowhere left to go
+ **/
+func scaffoldParentOf(dir: string) -> string {
+    // The root is the end of every walk
+    if str_eq(dir, "/") {
+        return ""
+    }
+
+    // A relative walk grows another ".." rather than shrinking
+    if str_eq(dir, ".") {
+        return ".."
+    }
+    if str_eq(dir, "..") || ends_with(dir, "/..") {
+        return dir + "/.."
+    }
+
+    // Everything else shrinks toward the root
+    up: string = path_dirname(dir)
+
+    // A dirname that did not move means there is nowhere left to go
+    if str_eq(up, dir) {
+        return ""
+    }
+
+    // The parent
+    return up
+}
+
+/**
+ * scaffoldAddWiring
+ * Splices a child command's import and addCommand call into its parent's constructor file
+ * @param parentPath {string} - the parent constructor file, for instance app/cmd/root.dusk
+ * @param parentIdent {string} - the parent's identifier, "root" for the root command
+ * @param child {string} - the child command name, sanitized to an identifier here
+ * @return true paired with an empty error when the file is wired, false paired with an
+ * empty error when the anchors are missing, false paired with a real error on a read or
+ * write failure
+ **/
+export func scaffoldAddWiring(parentPath: string, parentIdent: string, child: string) -> (bool, error) {
+    // The sanitized identifier the child's file and constructor are named after
+    id: string = scaffoldIdent(child)
+    // The module name, which is the file name and stays snake since @import takes a path
+    module: string = id + "_cmd"
+    // The constructor name, which is camelCase like the rest of the API
+    ctor: string = id + "Cmd"
+
+    // The import line spliced after the last @import
+    importLine: string = "@import " + module
+    // The call spliced before the parent's return c
+    addLine: string = "    c.addCommand(" + ctor + "())"
+    // The what-comment spliced above that call
+    addComment: string = "    // Hang the " + child + " command off this one"
+    // The exact signature line the return c is searched for under
+    anchor: string = "export func " + parentIdent + "Cmd() -> *Command"
+
+    // Read the parent file whole
+    text, re := read_file(parentPath)
+    if re.exists() {
+        return (false, error { message: "cannot read " + parentPath + ": " + re.message })
+    }
+
+    // The file split into lines
+    lines: *Vector<string> = str_split(text, "\n")
+    // How many lines there are
+    n: int64 = vec_len(lines)
+
+    // The last @import line
+    mut impIdx: int64 = -1
+    // The anchor line
+    mut fnIdx: int64 = -1
+    // Whether the import is already there
+    mut haveImp: bool = false
+    // Whether the addCommand call is already there
+    mut haveAdd: bool = false
+    // Cursor over the lines
+    mut i: int64 = 0
+
+    // Loop finding the two insertion points and whether either edit is already made
+    while i < n {
+        // The current line
+        line: string = vec_get(lines, i)
+        // The current line without its indentation
+        t: string = trim(line)
+
+        // Remember the last import seen, and whether it is the one to add
+        if starts_with(t, "@import ") {
+            impIdx = i
+            if str_eq(t, importLine) {
+                haveImp = true
+            }
+        }
+
+        // The anchor is the first exact signature line, not the first constructor in the file
+        if fnIdx < 0 && starts_with(t, anchor) {
+            fnIdx = i
+        }
+
+        // The child may already be wired in from an earlier run
+        if str_contains(t, "c.addCommand(" + ctor + "())") {
+            haveAdd = true
+        }
+        i = i + 1
+    }
+
+    // Both edits already made, so wiring again is a no-op
+    if haveImp && haveAdd {
+        return (true, error {})
+    }
+
+    // The return c that closes the parent's constructor
+    mut retIdx: int64 = -1
+    // Cursor starting just after the anchor
+    mut j: int64 = fnIdx + 1
+    // Only worth scanning when the anchor was found
+    mut scanning: bool = fnIdx >= 0
+
+    // Loop looking for the return c before the next top level block begins
+    while scanning && j < n {
+        // The current line
+        line: string = vec_get(lines, j)
+        if starts_with(line, "}") {
+            scanning = false
+        } else {
+            if str_eq(trim(line), "return c") {
+                retIdx = j
+                scanning = false
+            }
+            j = j + 1
+        }
+    }
+
+    // A file with no import to follow or no return c to precede is left to the caller
+    if impIdx < 0 || retIdx < 0 {
+        return (false, error {})
+    }
+
+    // The builder the rewritten file is assembled on
+    b: *StringBuilder = alloc(sb_new())
+    // Cursor over the lines
+    mut k: int64 = 0
+
+    // Loop copying every line back out, dropping the two new ones in as they come up
+    while k < n {
+        // The current line
+        line: string = vec_get(lines, k)
+
+        // The addCommand call and its comment go immediately before the return c
+        if k == retIdx && !haveAdd {
+            sb_push(b, addComment)
+            sb_push(b, "\n")
+            sb_push(b, addLine)
+            sb_push(b, "\n")
+        }
+
+        // The line itself
+        sb_push(b, line)
+
+        // Every line but the last keeps its newline
+        if k < n - 1 {
+            sb_push(b, "\n")
+        }
+
+        // The import goes immediately after the last one already there
+        if k == impIdx && !haveImp {
+            if k == n - 1 {
+                sb_push(b, "\n")
+            }
+            sb_push(b, importLine)
+            sb_push(b, "\n")
+        }
+        k = k + 1
+    }
+
+    // Copy the builder out before freeing it
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+
+    // Write the rewritten file back over the original
+    we := write_file(parentPath, out)
+    if we.exists() {
+        return (false, error { message: "cannot write " + parentPath + ": " + we.message })
+    }
+
+    // Wired
+    return (true, error {})
+}
+
+/**
+ * scaffoldFindRootDusk
+ * The stem of the first .dusk file sitting directly inside a directory
+ * @param dir {string} - the directory to look in
+ * @return the stem paired with true, or "" paired with false when there is no such file
+ **/
+export func scaffoldFindRootDusk(dir: string) -> (string, bool) {
+    // Open the directory for reading
+    d, oe := dir_open(dir)
+    if oe.exists() {
+        return ("", false)
+    }
+
+    // The stem of the file that was found
+    mut answer: string = ""
+    // Whether one was found
+    mut found: bool = false
+    // Whether there are more entries to read
+    mut going: bool = true
+
+    // Loop over every entry, keeping the first dusk file and draining the rest
+    while going {
+        // The next entry name, paired with whether there was one
+        name, more := dir_next(d)
+        if !more {
+            going = false
+        } else {
+            // Subdirectories are never opened, so a project's cmd/ never matches
+            if ends_with(name, ".dusk") && !found {
+                answer = substring(name, 0, str_len(name) - 5)
+                found = true
+            }
+        }
+    }
+
+    // Close the directory, the close failure tells the caller nothing useful
+    ce := dir_close(d)
+    ce.ignore()
+
+    // The stem paired with whether there was one
+    return (answer, found)
+}

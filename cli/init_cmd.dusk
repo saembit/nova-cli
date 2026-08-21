@@ -1,0 +1,417 @@
+/**
+ * cli/init_cmd.dusk
+ * nova-cli init [name], the whole-project scaffold
+ *
+ * This file owns the nova types, every filesystem effect goes through cli/scaffold.dusk and
+ * every byte of generated source through cli/templates.dusk, so those two stay checkable on
+ * their own while the library next door is still being written. nova.* resolves from this
+ * directory through the cli/nova symlink that points at the repository's nova/.
+ *
+ * Since dusk 1.14 a generated project is a dawn project, and that is what init writes by
+ * default. Layout produced by nova-cli init --dir myapp:
+ *
+ *     myapp/package.dawn    the manifest, @root myapp.dusk, @require nova <source> <ref>
+ *     myapp/myapp.dusk      root program, dawn run or dusk build myapp.dusk
+ *     myapp/cmd/root.dusk   the root command constructor
+ *     myapp/.gitignore      target/ and dawn_modules/
+ *     myapp/dawn_modules/   written by the dawn get this command runs for you
+ *
+ * No symlinks and no copied library, alias resolution is manifest wide, so every file in the
+ * project spells @import nova.command and dusk finds it under dawn_modules/nova. --no-fetch
+ * skips the fetch, and a fetch that fails is a warning and not a failure, because the project
+ * on disk is already correct.
+ *
+ * --vendor is the pre 1.14 shape, still supported for a tree that must build with no dawn at
+ * all, the library is copied into <dir>/nova, cmd/nova is symlinked to it, and the manifest
+ * is written without its @require line. --link is the same thing with a symlink in place of
+ * the copy.
+ *
+ * Nothing is ever overwritten, an existing path is reported skipped and left exactly as it
+ * was, so init is safe to re-run over a project you have started editing. Re-running it with
+ * a different name is refused instead, since two root files in one directory would both
+ * export main and neither would build.
+ *
+ * Every export carries the init prefix.
+ **/
+
+@paradigm procedural
+
+@import nova.command
+@import nova.context
+@import nova.flagset
+@import nova.args
+@import nova.nova
+
+@import std.string
+@import std.fs
+
+@import scaffold
+@import templates
+
+/**
+ * initDefaultSource
+ * The repository a generated manifest pins nova at when --source is not given
+ * @return the default @require source
+ **/
+func initDefaultSource() -> string {
+    // dawn assumes https for a bare host/owner/repo, so this needs no scheme
+    return "github.com/choice404/nova-cli"
+}
+
+/**
+ * initDefaultRef
+ * The git reference a generated manifest pins nova at when --ref is not given
+ * @return the default @require reference
+ **/
+func initDefaultRef() -> string {
+    // The tag cut for the library version this generator was built against
+    return "v" + novaVersion()
+}
+
+/**
+ * initProjectName
+ * The application name for a run of init
+ * @param ctx {*Context} - the running context, read for its positional args
+ * @param dir {string} - the --dir value
+ * @return the positional argument, else the last component of --dir, else "app"
+ **/
+func initProjectName(ctx: *Context, dir: string) -> string {
+    // A positional argument wins whenever there is one
+    if ctx.nargs() > 0 {
+        return ctx.arg(0)
+    }
+
+    // The last component of --dir, which is what the project is usually called
+    base: string = path_basename(dir)
+
+    // A nameless directory falls back to a fixed name
+    if str_len(base) == 0 || str_eq(base, ".") || str_eq(base, "..") || str_eq(base, "/") {
+        return "app"
+    }
+
+    // The directory's own name
+    return base
+}
+
+/**
+ * initWrite
+ * Writes one generated file unless it is already there, reporting either way on stdout
+ * @param path {string} - the file to write
+ * @param text {string} - the contents
+ * @return an empty error on success, or the write failure
+ **/
+func initWrite(path: string, text: string) -> error {
+    // Write the file, leaving an existing one alone
+    made, e := scaffoldWriteIfAbsent(path, text)
+    if e.exists() {
+        return e
+    }
+
+    // Report which of the two happened
+    if made {
+        println("created  {}", path)
+    } else {
+        println("exists, skipping  {}", path)
+    }
+
+    // Empty on success
+    return error {}
+}
+
+/**
+ * initNovaHome
+ * The directory that holds the nova library to vendor or link
+ * @param ctx {*Context} - the running context, read for its raw argv
+ * @return the directory that contains nova/
+ **/
+func initNovaHome(ctx: *Context) -> string {
+    // The raw argv the process was started with
+    av: string[] = (*ctx).argv
+
+    // An empty argv leaves the current directory as the only starting point
+    if av.len == 0 {
+        return scaffoldFindNovaHome(".")
+    }
+
+    // Search from NOVA_HOME, then the running binary, then argv[0]
+    return scaffoldFindNovaHome(av[0])
+}
+
+/**
+ * initHomeHint
+ * The advice appended to every failure to find the library
+ * @return the hint text, opening with a semicolon so it appends to a message
+ **/
+func initHomeHint() -> string {
+    // The fix is always one of the same two moves
+    return "; set NOVA_HOME to the directory that holds nova/, or drop --vendor and let dawn fetch it"
+}
+
+/**
+ * initInstallNova
+ * Installs the library into a --vendor or --link project
+ * @param dir {string} - the project directory
+ * @param home {string} - the directory that contains the nova/ to install
+ * @param link {bool} - true to symlink instead of copying
+ * @return an empty error on success, or the copy or link failure
+ **/
+func initInstallNova(dir: string, home: string, link: bool) -> error {
+    // Where the library goes
+    dst: string = path_join(dir, "nova")
+    // Where it comes from
+    src: string = path_join(home, "nova")
+
+    // An existing library is left exactly as it is
+    if scaffoldExists(dst) {
+        println("exists, skipping  {}", dst)
+        return error {}
+    }
+
+    // --link points at the library in place rather than copying it
+    if link {
+        e := scaffoldSymlinkAbs(src, dst)
+        if e.exists() {
+            return error { message: e.message + initHomeHint() }
+        }
+        println("linked   {} -> {}", dst, src)
+        return error {}
+    }
+
+    // --vendor copies every dusk file in
+    e := scaffoldCopyDir(src, dst)
+    if e.exists() {
+        return error { message: e.message + initHomeHint() }
+    }
+    println("vendored {} from {}", dst, src)
+
+    // A copy with no command.dusk in it means the search found the wrong directory
+    if !scaffoldExists(path_join(dst, "command.dusk")) {
+        printerr("warning: no command.dusk under " + src + initHomeHint())
+    }
+
+    // Empty on success
+    return error {}
+}
+
+/**
+ * initLinkCmdNova
+ * Makes the cmd/nova symlink a vendored project needs
+ * @param dir {string} - the project directory
+ * @return an empty error on success, or the link failure
+ **/
+func initLinkCmdNova(dir: string) -> error {
+    // The link that gives cmd/ its own path to the library
+    link: string = path_join(dir, "cmd/nova")
+
+    // An existing link is left exactly as it is
+    if scaffoldExists(link) {
+        println("exists, skipping  {}", link)
+        return error {}
+    }
+
+    // With no manifest alias, dusk resolves @import nova.command against cmd/ itself
+    e := scaffoldSymlink("../nova", link)
+    if e.exists() {
+        return e
+    }
+
+    // Report the link
+    println("created  {} -> ../nova", link)
+
+    // Empty on success
+    return error {}
+}
+
+/**
+ * initHasOtherRoot
+ * Whether a directory already holds an application root under a different name
+ * @param dir {string} - the project directory
+ * @param name {string} - the name this run of init was given
+ * @return true after printing the warning, false when there is nothing in the way
+ **/
+func initHasOtherRoot(dir: string, name: string) -> bool {
+    // No cmd/root.dusk means no init has run here
+    if !scaffoldExists(path_join(dir, "cmd/root.dusk")) {
+        return false
+    }
+
+    // The root file this run would write is already there, so the name matches
+    if scaffoldExists(path_join(dir, name + ".dusk")) {
+        return false
+    }
+
+    // The root file that is there, which names the application already scaffolded
+    existing, found := scaffoldFindRootDusk(dir)
+
+    // What to blame in the warning
+    mut who: string = "cmd/root.dusk"
+    if found {
+        who = existing + ".dusk"
+    }
+
+    // Writing a second root would leave two main functions in one directory
+    printerr("warning: " + dir + " already holds an application root (" + who + "); nothing created for " + name)
+
+    // Something is in the way
+    return true
+}
+
+/**
+ * initWriteFiles
+ * Writes the four files every generated project gets, whichever mode it is in
+ * @param dir {string} - the project directory
+ * @param name {string} - the application name
+ * @param source {string} - the @require source, unused when vendored
+ * @param ref {string} - the @require reference, unused when vendored
+ * @param vendored {bool} - true to leave the manifest's @require line out
+ * @return an empty error on success, or the first write failure
+ **/
+func initWriteFiles(dir: string, name: string, source: string, ref: string, vendored: bool) -> error {
+    // The manifest, which is what makes the directory a dawn project
+    me := initWrite(path_join(dir, "package.dawn"), tplPackageDawn(name, source, ref, vendored))
+    if me.exists() {
+        return me
+    }
+
+    // The root program
+    re := initWrite(path_join(dir, name + ".dusk"), tplRootFile(name))
+    if re.exists() {
+        return re
+    }
+
+    // The root command constructor
+    ce := initWrite(path_join(dir, "cmd/root.dusk"), tplRootCmd(name))
+    if ce.exists() {
+        return ce
+    }
+
+    // The .gitignore, the last of the four
+    return initWrite(path_join(dir, ".gitignore"), tplGitignore())
+}
+
+/**
+ * initRun
+ * Scaffolds the project, the init handler
+ * @param ctx {*Context} - the running context
+ * @return 0 on success, including a success whose dawn get failed, 1 on any filesystem
+ * failure or when the directory already holds a differently named application root
+ **/
+func initRun(ctx: *Context) -> int32 {
+    // The directory to scaffold into
+    dir: string = ctx.getStr("dir")
+    // Whether the library is symlinked in
+    link: bool = ctx.getBool("link")
+    // Whether the manifest leaves its @require out, which --link implies
+    vendored: bool = ctx.getBool("vendor") || link
+    // Whether dawn get is skipped
+    noFetch: bool = ctx.getBool("no-fetch")
+    // The repository the manifest requires nova from
+    source: string = ctx.getStr("source")
+    // The git reference it pins nova at
+    ref: string = ctx.getStr("ref")
+    // The application name
+    name: string = initProjectName(ctx, dir)
+
+    // The name is spliced into source and into the manifest, so it is checked first
+    if !scaffoldValidName(name) {
+        return ctx.fail("invalid application name \"" + name + "\"")
+    }
+
+    // The manifest format has no escapes, so both directive arguments are checked too
+    if !scaffoldValidToken(source) {
+        return ctx.fail("invalid --source \"" + source + "\"")
+    }
+    if !scaffoldValidToken(ref) {
+        return ctx.fail("invalid --ref \"" + ref + "\"")
+    }
+
+    // A directory already holding another application is refused rather than skipped
+    if initHasOtherRoot(dir, name) {
+        return int32(1)
+    }
+
+    // Make cmd/ before writing into it
+    de := scaffoldMkdir(path_join(dir, "cmd"))
+    if de.exists() {
+        return ctx.fail(de.message)
+    }
+
+    // Write the manifest, the root program, the root command, and the .gitignore
+    fe := initWriteFiles(dir, name, source, ref, vendored)
+    if fe.exists() {
+        return ctx.fail(fe.message)
+    }
+
+    // A vendored or linked project carries the library itself and never calls dawn
+    if vendored {
+        ne := initInstallNova(dir, initNovaHome(ctx), link)
+        if ne.exists() {
+            return ctx.fail(ne.message)
+        }
+        le := initLinkCmdNova(dir)
+        if le.exists() {
+            return ctx.fail(le.message)
+        }
+        println("Next: cd {} && dusk run {}.dusk", dir, name)
+        return int32(0)
+    }
+
+    // --no-fetch leaves the fetching to the user
+    if noFetch {
+        println("Next: cd {} && dawn get && dawn run", dir)
+        return int32(0)
+    }
+
+    // Fetch the library into dawn_modules/
+    fetched, ok := scaffoldDawnGet(dir)
+
+    // A failed fetch is a warning, the project on disk is already correct
+    if !ok {
+        printerr("warning: dawn get failed; run it yourself in " + dir)
+        return int32(0)
+    }
+
+    // Print dawn's own progress lines after the created lines, in order
+    if str_len(fetched) > 0 {
+        println(fetched)
+    }
+
+    // Tell the user what to run next
+    println("Next: cd {} && dawn run", dir)
+
+    // Report success
+    return int32(0)
+}
+
+/**
+ * initCmd
+ * The init command, nova-cli init [name] with its directory, source, and mode flags
+ * @return a fresh command, owned by the tree it is added to
+ **/
+export func initCmd() -> *Command {
+    // The command itself
+    c: *Command = cmdNew("init [name]", "Scaffold a new nova application")
+
+    // The long description shown by --help
+    c.setLong("Initialize a nova application in --dir: a package.dawn requiring the nova library, a root program, a cmd/ directory holding the root command, and a .gitignore. `dawn get` then fetches nova into dawn_modules/, which --no-fetch skips.\nThe name defaults to the last component of --dir, or \"app\" when --dir is \".\".\n--vendor writes the pre-1.14 shape instead: the library copied into <dir>/nova, reached from cmd/ through a symlink, and no requirement in the manifest. --link symlinks that copy.\nExisting files are never overwritten.")
+    // The examples shown under it
+    c.setExample("  nova-cli init myapp --dir myapp\n  nova-cli init --dir . --ref v0.1.0\n  nova-cli init myapp --dir myapp --vendor")
+
+    // At most one positional, the name
+    c.setArgs(argsMax(1))
+    // The handler
+    c.setRun(initRun)
+
+    // The three string flags the handler reads
+    c.localFlags().addStr("dir", "d", ".", "directory to scaffold into")
+    c.localFlags().addStr("source", "s", initDefaultSource(), "repository to require the nova library from")
+    c.localFlags().addStr("ref", "r", initDefaultRef(), "git tag, branch, or commit to pin the nova library at")
+
+    // The three switches that pick the mode
+    c.localFlags().addBool("no-fetch", "", false, "write the manifest but do not run dawn get")
+    c.localFlags().addBool("vendor", "", false, "copy the nova library into the project instead of requiring it")
+    c.localFlags().addBool("link", "", false, "symlink the nova library into the project instead of requiring it")
+
+    // Return the finished command
+    return c
+}

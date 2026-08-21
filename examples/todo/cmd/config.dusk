@@ -1,0 +1,100 @@
+// todo config set <key> <value> and todo config get <key>, a nested parent
+// command that is not runnable itself.
+@paradigm procedural
+
+// The command type, the run context and the argument rules
+@import nova.command
+@import nova.context
+@import nova.args
+
+/**
+ * runConfigSet
+ * Prints the key and value that would have been written
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runConfigSet(ctx: *Context) -> int32 {
+    // The setting being written
+    key: string = ctx.arg(0)
+
+    // The value it is being set to
+    val: string = ctx.arg(1)
+
+    // Nothing is persisted, so just report the assignment
+    println("set {} = {}", key, val)
+
+    // Setting cannot fail
+    return 0
+}
+
+/**
+ * runConfigGet
+ * Prints the key that was asked for, always as unset since nothing is stored
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runConfigGet(ctx: *Context) -> int32 {
+    // The setting being read
+    key: string = ctx.arg(0)
+
+    // There is no store behind this, so every key reads back unset
+    println("get {} = <unset>", key)
+
+    // Reading cannot fail
+    return 0
+}
+
+/**
+ * configSetCmd
+ * Builds the set subcommand, which takes a key and a value
+ * @return *Command - the config set subcommand
+ **/
+func configSetCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("set", "Set a configuration value")
+
+    // Exactly two positional arguments, the key and the value
+    c.setArgs(argsExact(2))
+
+    // The handler
+    c.setRun(runConfigSet)
+
+    // Hand the finished command back to the caller
+    return c
+}
+
+/**
+ * configGetCmd
+ * Builds the get subcommand, which takes just a key
+ * @return *Command - the config get subcommand
+ **/
+func configGetCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("get", "Get a configuration value")
+
+    // Exactly one positional argument, the key
+    c.setArgs(argsExact(1))
+
+    // The handler
+    c.setRun(runConfigGet)
+
+    // Hand the finished command back to the caller
+    return c
+}
+
+/**
+ * configCmd
+ * Builds the config parent command, which has no run of its own and only groups set and get
+ * @return *Command - the config subcommand
+ **/
+export func configCmd() -> *Command {
+    // The command, name and one line description, with no setRun so it prints its help instead
+    c: *Command = cmdNew("config", "Manage configuration")
+
+    // The two leaves under it
+    c.addCommand(configSetCmd())
+    c.addCommand(configGetCmd())
+
+    // Hand the finished command back to the caller
+    return c
+}

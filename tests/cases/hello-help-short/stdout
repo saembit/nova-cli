@@ -1,0 +1,13 @@
+hello prints a friendly greeting.
+
+The greeting is repeated --times times, and any positional arguments
+are joined with spaces and used instead of --name.
+
+Usage:
+  hello [flags]
+
+Flags:
+  -h, --help          help for hello
+  -n, --name string   who to greet (default "world")
+  -s, --shout         shout the greeting
+  -t, --times int     how many times to greet (default 1)

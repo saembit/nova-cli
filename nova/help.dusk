@@ -1,0 +1,510 @@
+/**
+ * nova/help.dusk
+ * Help and usage rendering in the Cobra layout, the builtin help command and the version line
+ **/
+@paradigm oop
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import flagset
+@import text
+@import command
+@import context
+
+// The gap between the flag column and its description
+func helpFlagGap() -> int64 {
+    return 3
+}
+
+/**
+ * novaVersionString
+ * Builds the "<name> version <version>" line for the root command
+ * @param rootc {*Command} - the root command
+ * @return a fresh heap string
+ **/
+export func novaVersionString(rootc: *Command) -> string {
+    return (*rootc).name + " version " + (*rootc).version
+}
+
+/**
+ * helpFlagHelp
+ * The description of the synthesized --help flag for a command
+ * @param subject {*Command} - the command
+ * @return the help text
+ **/
+export func helpFlagHelp(subject: *Command) -> string {
+    return "help for " + (*subject).name
+}
+
+/**
+ * helpVersionHelp
+ * The description of the root's --version flag
+ * @param rootc {*Command} - the root command
+ * @return the help text
+ **/
+export func helpVersionHelp(rootc: *Command) -> string {
+    return "version for " + (*rootc).name
+}
+
+// Orders two flags by long name for vec_sort
+func helpFlagCmp(a: *Flag, b: *Flag) -> int32 {
+    return str_cmp((*a).name, (*b).name)
+}
+
+// The path of the command's parent on the chain, "" for the root
+func helpParentPath(chain: *Vector<*Command>) -> string {
+    // The root has no parent
+    n: int64 = vec_len(chain)
+    if n < 2 {
+        return ""
+    }
+
+    // The entry before the last
+    p: *Command = vec_get(chain, n - 2)
+    return (*p).path
+}
+
+// The use line, parent path plus use plus " [flags]" unless the use already says so
+func helpUseLine(subject: *Command, chain: *Vector<*Command>) -> string {
+    // The parent path and a builder
+    parent: string = helpParentPath(chain)
+    sb: *StringBuilder = alloc(sb_new())
+
+    // Push the parent path when there is one
+    if parent != "" {
+        sb_push(sb, parent)
+        sb_push(sb, " ")
+    }
+
+    // Push the use and the [flags] marker
+    sb_push(sb, (*subject).use)
+    if !str_contains((*subject).use, "[flags]") {
+        sb_push(sb, " [flags]")
+    }
+
+    // Copy the text out and free the builder
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return out
+}
+
+// Appends the "Usage:" block with its trailing newline to sb
+func helpPushUsage(sb: *StringBuilder, subject: *Command, chain: *Vector<*Command>) -> void {
+    // The header
+    sb_push(sb, "Usage:\n")
+
+    // The use line when the command runs
+    if (*subject).hasRun {
+        sb_push(sb, "  ")
+        ul: string = helpUseLine(subject, chain)
+        sb_push(sb, ul)
+        free(ul)
+        sb_push(sb, "\n")
+    }
+
+    // The [command] line when it has subcommands
+    if subject.hasSubcommands() {
+        sb_push(sb, "  ")
+        sb_push(sb, (*subject).path)
+        sb_push(sb, " [command]\n")
+    }
+}
+
+// Appends the "Available Commands:" block when the command has visible children
+func helpPushCommands(sb: *StringBuilder, subject: *Command) -> void {
+    // Nothing to show
+    if !subject.hasSubcommands() {
+        return
+    }
+
+    // The visible children
+    shown: *Vector<*Command> = cmdVisibleKids(subject)
+
+    // The widest child name
+    mut width: int64 = 0
+    mut i: int64 = 0
+    while i < vec_len(shown) {
+        k: *Command = vec_get(shown, i)
+        n: int64 = str_len((*k).name)
+        if n > width {
+            width = n
+        }
+        i = i + 1
+    }
+
+    // The header
+    sb_push(sb, "\nAvailable Commands:\n")
+
+    // One padded line per child
+    mut j: int64 = 0
+    while j < vec_len(shown) {
+        k: *Command = vec_get(shown, j)
+        padded: string = textPadRight((*k).name, width + 2)
+        sb_push(sb, "  ")
+        sb_push(sb, padded)
+        sb_push(sb, (*k).short)
+        sb_push(sb, "\n")
+        free(padded)
+        j = j + 1
+    }
+}
+
+// Checks if a flag named name is already in out
+func helpHasFlagNamed(out: *Vector<*Flag>, name: string) -> bool {
+    // Loop over the flags collected so far
+    mut i: int64 = 0
+    while i < vec_len(out) {
+        f: *Flag = vec_get(out, i)
+        if (*f).name == name {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Pushes every visible flag of fset onto out, skipping any name already in taken
+func helpCollectVisible(out: *Vector<*Flag>, taken: *Vector<string>, fset: *FlagSet) -> void {
+    // Loop over the flags in the set
+    mut i: int64 = 0
+    while i < fset.len() {
+        // Claim the name then keep the flag when it is visible
+        f: *Flag = fset.get(i)
+        if !vec_contains(taken, (*f).name) {
+            vec_push(taken, (*f).name)
+            if !(*f).hidden && (*f).deprecated == "" {
+                vec_push(out, f)
+            }
+        }
+        i = i + 1
+    }
+}
+
+// The left cell of a flag line, "  -s, --name type" or "      --name type"
+func helpFlagCell(f: *Flag) -> string {
+    // A builder for the cell
+    sb: *StringBuilder = alloc(sb_new())
+    sb_push(sb, "  ")
+
+    // The shorthand or its padding
+    if (*f).short != "" {
+        sb_push(sb, "-")
+        sb_push(sb, (*f).short)
+        sb_push(sb, ", ")
+    } else {
+        sb_push(sb, "    ")
+    }
+
+    // The long name
+    sb_push(sb, "--")
+    sb_push(sb, (*f).name)
+
+    // The type word when the kind has one
+    word: string = flagKindWord((*f).kind)
+    if word != "" {
+        sb_push(sb, " ")
+        sb_push(sb, word)
+    }
+
+    // Copy the text out and free the builder
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return out
+}
+
+// The " (default ...)" suffix of a flag line, "" when the default is zero
+func helpFlagDefault(f: *Flag) -> string {
+    // Pick the suffix by kind
+    match (*f).kind {
+        KBool => return "",
+        KStr => {
+            if (*f).defS == "" {
+                return ""
+            }
+            return " (default \"" + (*f).defS + "\")"
+        },
+        KInt => {
+            if (*f).defI == 0 {
+                return ""
+            }
+            return " (default " + int_to_string((*f).defI) + ")"
+        },
+    }
+    return ""
+}
+
+// Appends one aligned line per flag in flags, which is already sorted
+func helpPushFlagLines(sb: *StringBuilder, flags: *Vector<*Flag>) -> void {
+    // The left cells and the widest one
+    cells: *Vector<string> = alloc(vec_new())
+    mut width: int64 = 0
+    mut i: int64 = 0
+    while i < vec_len(flags) {
+        cell: string = helpFlagCell(vec_get(flags, i))
+        n: int64 = str_len(cell)
+        if n > width {
+            width = n
+        }
+        vec_push(cells, cell)
+        i = i + 1
+    }
+
+    // One padded line per flag
+    mut j: int64 = 0
+    while j < vec_len(flags) {
+        f: *Flag = vec_get(flags, j)
+        padded: string = textPadRight(vec_get(cells, j), width + helpFlagGap())
+        suffix: string = helpFlagDefault(f)
+        sb_push(sb, padded)
+        sb_push(sb, (*f).help)
+        sb_push(sb, suffix)
+        sb_push(sb, "\n")
+        free(padded)
+        j = j + 1
+    }
+}
+
+// Appends the "Flags:" block, the local flags, own persistent flags and the --help line sorted by name
+func helpPushFlags(sb: *StringBuilder, subject: *Command) -> void {
+    // The flags to show and the names claimed
+    flags: *Vector<*Flag> = alloc(vec_new())
+    taken: *Vector<string> = alloc(vec_new())
+
+    // Collect the local flags then the own persistent flags
+    localf: *FlagSet = (*subject).flags
+    pfl: *FlagSet = (*subject).pflags
+    helpCollectVisible(flags, taken, localf)
+    helpCollectVisible(flags, taken, pfl)
+
+    // Synthesize the --help flag when none is declared
+    if !vec_contains(taken, "help") {
+        synth: *FlagSet = flagsetNew()
+        synth.addBool("help", "h", false, helpFlagHelp(subject))
+        vec_push(flags, synth.get(0))
+    }
+
+    // Sort and append the lines
+    vec_sort(flags, helpFlagCmp)
+    sb_push(sb, "\nFlags:\n")
+    helpPushFlagLines(sb, flags)
+}
+
+// Appends the "Global Flags:" block, the ancestors' persistent flags minus the names the leaf defines
+func helpPushGlobalFlags(sb: *StringBuilder, chain: *Vector<*Command>) -> void {
+    // The flags to show and the names claimed
+    flags: *Vector<*Flag> = alloc(vec_new())
+    taken: *Vector<string> = alloc(vec_new())
+
+    // The leaf on the chain
+    n: int64 = vec_len(chain)
+    leaf: *Command = vec_get(chain, n - 1)
+
+    // Claim the names of the leaf's own flags
+    own: *Vector<*Flag> = alloc(vec_new())
+    localf: *FlagSet = (*leaf).flags
+    pfl: *FlagSet = (*leaf).pflags
+    helpCollectVisible(own, taken, localf)
+    helpCollectVisible(own, taken, pfl)
+
+    // Collect the ancestors' persistent flags, nearest first
+    mut i: int64 = n - 2
+    while i >= 0 {
+        c: *Command = vec_get(chain, i)
+        pf: *FlagSet = (*c).pflags
+        helpCollectVisible(flags, taken, pf)
+        i = i - 1
+    }
+
+    // Nothing to show
+    if vec_len(flags) == 0 {
+        return
+    }
+
+    // Sort and append the lines
+    vec_sort(flags, helpFlagCmp)
+    sb_push(sb, "\nGlobal Flags:\n")
+    helpPushFlagLines(sb, flags)
+}
+
+/**
+ * helpRender
+ * Builds the full help text for subject in the Cobra layout, ending with a newline
+ * @param subject {*Command} - the command to describe
+ * @param chain {*Vector<*Command>} - the commands root..subject
+ * @return a fresh heap string
+ **/
+export func helpRender(subject: *Command, chain: *Vector<*Command>) -> string {
+    return helpRenderParts(subject, chain, true)
+}
+
+/**
+ * helpRenderUsage
+ * Builds the usage text for subject, the help text without the leading description
+ * @param subject {*Command} - the command to describe
+ * @param chain {*Vector<*Command>} - the commands root..subject
+ * @return a fresh heap string
+ **/
+export func helpRenderUsage(subject: *Command, chain: *Vector<*Command>) -> string {
+    return helpRenderParts(subject, chain, false)
+}
+
+/**
+ * helpRenderParts
+ * The shared renderer behind helpRender and helpRenderUsage
+ * @param subject {*Command} - the command to describe
+ * @param chain {*Vector<*Command>} - the commands root..subject
+ * @param withDesc {bool} - whether the description goes on top
+ * @return a fresh heap string
+ **/
+func helpRenderParts(subject: *Command, chain: *Vector<*Command>, withDesc: bool) -> string {
+    // A builder for the text
+    sb: *StringBuilder = alloc(sb_new())
+
+    // The long or short description on top
+    if withDesc {
+        if (*subject).long != "" {
+            sb_push(sb, (*subject).long)
+            sb_push(sb, "\n\n")
+        } else if (*subject).short != "" {
+            sb_push(sb, (*subject).short)
+            sb_push(sb, "\n\n")
+        }
+    }
+
+    // The Usage block
+    helpPushUsage(sb, subject, chain)
+
+    // The Aliases block
+    aliases: *Vector<string> = (*subject).aliases
+    if vec_len(aliases) > 0 {
+        sb_push(sb, "\nAliases:\n  ")
+        sb_push(sb, (*subject).name)
+        mut i: int64 = 0
+        while i < vec_len(aliases) {
+            sb_push(sb, ", ")
+            sb_push(sb, vec_get(aliases, i))
+            i = i + 1
+        }
+        sb_push(sb, "\n")
+    }
+
+    // The Examples block
+    if (*subject).example != "" {
+        sb_push(sb, "\nExamples:\n")
+        sb_push(sb, (*subject).example)
+        sb_push(sb, "\n")
+    }
+
+    // The commands and flag blocks
+    helpPushCommands(sb, subject)
+    helpPushFlags(sb, subject)
+    helpPushGlobalFlags(sb, chain)
+
+    // The footer when it has subcommands
+    if subject.hasSubcommands() {
+        sb_push(sb, "\nUse \"")
+        sb_push(sb, (*subject).path)
+        sb_push(sb, " [command] --help\" for more information about a command.\n")
+    }
+
+    // Copy the text out and free the builder
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return out
+}
+
+/**
+ * helpPrint
+ * Prints the help text for subject to stdout
+ * @param subject {*Command} - the command to describe
+ * @param chain {*Vector<*Command>} - the commands root..subject
+ * @return ...
+ **/
+export func helpPrint(subject: *Command, chain: *Vector<*Command>) -> void {
+    // Render, print and free
+    s: string = helpRender(subject, chain)
+    print(s)
+    free(s)
+}
+
+/**
+ * usagePrint
+ * Prints the usage text for subject to stderr, what Cobra shows after "Unknown help topic"
+ * @param subject {*Command} - the command
+ * @param chain {*Vector<*Command>} - the commands root..subject
+ * @return ...
+ **/
+export func usagePrint(subject: *Command, chain: *Vector<*Command>) -> void {
+    // Render without the trailing newline since printerr adds one
+    s: string = helpRenderUsage(subject, chain)
+    trimmed: string = substring(s, 0, str_len(s) - 1)
+    printerr(trimmed)
+    free(trimmed)
+    free(s)
+}
+
+// The handler of the builtin help command, walks ctx.args as a child path from the root for as long as the words match
+func helpCommandRun(ctx: *Context) -> int32 {
+    // The root and the words after help
+    rootc: *Command = (*ctx).root
+    words: *Vector<string> = (*ctx).args
+
+    // The chain walked so far, starting at the root
+    chain: *Vector<*Command> = alloc(vec_new())
+    vec_push(chain, rootc)
+
+    // Descend while each word names a child
+    mut i: int64 = 0
+    mut matching: bool = true
+    while matching && i < vec_len(words) {
+        curc: *Command = vec_get(chain, vec_len(chain) - 1)
+        j: int64 = curc.findChild(vec_get(words, i))
+        if j < 0 {
+            matching = false
+        } else {
+            vec_push(chain, curc.child(j))
+            i = i + 1
+        }
+    }
+
+    // The deepest command matched
+    last: *Command = vec_get(chain, vec_len(chain) - 1)
+
+    // Words left over under a command with subcommands is an unknown topic
+    if i < vec_len(words) && last.numChildren() > 0 {
+        joined: string = str_join(words, " ")
+        printerr("Unknown help topic [" + joined + "]")
+        free(joined)
+        rootchain: *Vector<*Command> = alloc(vec_new())
+        vec_push(rootchain, rootc)
+        usagePrint(rootc, rootchain)
+        return 1
+    }
+
+    // Print the help of the command matched
+    helpPrint(last, chain)
+    return 0
+}
+
+/**
+ * helpCommandNew
+ * Builds the builtin help [command] command novaExecute adds to a root with subcommands
+ * @param appName {string} - the root command's name, used in the long description
+ * @return the new command
+ **/
+export func helpCommandNew(appName: string) -> *Command {
+    // The command with its use and short
+    c: *Command = cmdNew("help [command]", "Help about any command")
+
+    // The long description and the handler
+    c.setLong("Help provides help for any command in the application.\nSimply type " + appName + " help [path to command] for full details.")
+    c.setRun(helpCommandRun)
+
+    // Mark it builtin so inherited required flags skip it
+    (*c).isBuiltin = true
+    return c
+}

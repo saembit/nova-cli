@@ -1,0 +1,233 @@
+/**
+ * nova/text.dusk
+ * Small text helpers the rest of nova shares, padding for help columns, quoting for messages, the dash tests for the argv scanner, etc.
+ * Every function that returns a string returns a fresh heap string the caller owns unless the doc says otherwise
+ **/
+@paradigm oop
+@paradigm procedural
+
+@import std.string
+@import std.vector
+
+foreign "C" {
+    func abort() -> void
+}
+
+/**
+ * novaFault
+ * Prints "fatal: nova: <prefix><name><suffix>" to stderr and aborts the process
+ * @param prefix {string} - the text before the offending name
+ * @param name {string} - the offending name
+ * @param suffix {string} - the text after the name
+ * @return nothing, the process aborts
+ **/
+export func novaFault(prefix: string, name: string, suffix: string) -> void {
+    // Builder for the message
+    sb: *StringBuilder = alloc(sb_new())
+
+    // Push the fatal prefix and the three parts
+    sb_push(sb, "fatal: nova: ")
+    sb_push(sb, prefix)
+    sb_push(sb, name)
+    sb_push(sb, suffix)
+
+    // Print the message to stderr
+    printerr(sb_cstr(sb))
+
+    // Free the builder
+    sb_free(sb)
+    free(sb)
+
+    // Abort the process
+    abort()
+}
+
+/**
+ * textPadRight
+ * Pads s with spaces on the right until it is at least width bytes long, nothing is ever truncated
+ * @param s {string} - the text to pad
+ * @param width {int64} - the minimum byte width of the result
+ * @return a fresh heap string
+ **/
+export func textPadRight(s: string, width: int64) -> string {
+    // Builder for the padded text
+    sb: *StringBuilder = alloc(sb_new())
+
+    // Push the text first
+    sb_push(sb, s)
+
+    // The current length
+    mut n: int64 = str_len(s)
+
+    // Push spaces until the width is reached
+    while n < width {
+        sb_push_char(sb, 32)
+        n = n + 1
+    }
+
+    // Copy the builder out to a fresh string
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+
+    // Free the builder
+    sb_free(sb)
+    free(sb)
+
+    // Return the padded string
+    return out
+}
+
+/**
+ * textBool
+ * Gives the word "true" or "false" for a bool
+ * @param b {bool} - the value
+ * @return a static literal, never freed
+ **/
+export func textBool(b: bool) -> string {
+    // Return the word for the value
+    if b {
+        return "true"
+    }
+    return "false"
+}
+
+/**
+ * textQuote
+ * Wraps s in double quotes with no escaping
+ * @param s {string} - the text to quote
+ * @return a fresh heap string
+ **/
+export func textQuote(s: string) -> string {
+    // Return the quoted text
+    return "\"" + s + "\""
+}
+
+/**
+ * textJoinQuoted
+ * Double quotes every item of v and joins them with sep, such as "a", "b"
+ * @param v {*Vector<string>} - the items, borrowed
+ * @param sep {string} - the separator placed between items
+ * @return a fresh heap string, empty when v is empty
+ **/
+export func textJoinQuoted(v: *Vector<string>, sep: string) -> string {
+    // Builder for the joined text
+    sb: *StringBuilder = alloc(sb_new())
+
+    // Loop over the items
+    mut i: int64 = 0
+    while i < vec_len(v) {
+        // Push the separator before every item but the first
+        if i > 0 {
+            sb_push(sb, sep)
+        }
+
+        // Push the item wrapped in double quotes
+        sb_push_char(sb, 34)
+        sb_push(sb, vec_get(v, i))
+        sb_push_char(sb, 34)
+
+        i = i + 1
+    }
+
+    // Copy the builder out to a fresh string
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+
+    // Free the builder
+    sb_free(sb)
+    free(sb)
+
+    // Return the joined string
+    return out
+}
+
+/**
+ * textIsDigit
+ * Checks if c is an ASCII decimal digit
+ * @param c {char} - the byte to test
+ * @return true when c is 0 through 9
+ **/
+export func textIsDigit(c: char) -> bool {
+    // The byte as an int
+    n: int64 = c
+
+    // Check the byte is in the digit range
+    return n >= 48 && n <= 57
+}
+
+/**
+ * textIsLongFlag
+ * Checks if s is a long flag token, starts with "--" and has at least one more byte, a bare "--" is not one
+ * @param s {string} - the token
+ * @return true for a long flag token, malformed ones like "--=x" still count
+ **/
+export func textIsLongFlag(s: string) -> bool {
+    // Check the prefix and the length
+    return starts_with(s, "--") && str_len(s) > 2
+}
+
+/**
+ * textIsShortFlag
+ * Checks if s is a short flag token or cluster, starts with "-", has at least two bytes and the second byte is not "-" or a digit
+ * @param s {string} - the token
+ * @return true for a short flag token, "-" and "-5" are positional
+ **/
+export func textIsShortFlag(s: string) -> bool {
+    // Too short to be a short flag
+    if str_len(s) < 2 {
+        return false
+    }
+
+    // The first byte must be a dash
+    if s[0] != 45 {
+        return false
+    }
+
+    // A second dash is a long flag or the end of flags marker
+    if s[1] == 45 {
+        return false
+    }
+
+    // A digit after the dash is a negative number
+    return !textIsDigit(s[1])
+}
+
+/**
+ * textSplitEq
+ * Splits "name=value" on the first "=", with no "=" the whole of s is the name and the value is ""
+ * @param s {string} - the token, borrowed
+ * @return (name, value, hadEq), name and value are fresh heap strings
+ **/
+export func textSplitEq(s: string) -> (string, string, bool) {
+    // The index of the first "=" or -1
+    eq: int64 = str_find(s, "=")
+
+    // No "=" so the whole token is the name
+    if eq < 0 {
+        return (substring(s, 0, str_len(s)), substring("", 0, 0), false)
+    }
+
+    // Split around the "="
+    return (substring(s, 0, eq), substring(s, eq + 1, str_len(s)), true)
+}
+
+/**
+ * textCharAt
+ * Gives the single byte at s[i] as a one character string, the caller checks i < str_len(s)
+ * @param s {string} - the text
+ * @param i {int64} - the byte index
+ * @return a fresh heap string
+ **/
+export func textCharAt(s: string, i: int64) -> string {
+    // Return the one byte slice
+    return substring(s, i, i + 1)
+}
+
+/**
+ * textIsOneChar
+ * Checks if s is exactly one byte long
+ * @param s {string} - the text
+ * @return true when the length is 1
+ **/
+export func textIsOneChar(s: string) -> bool {
+    // Compare the length to 1
+    return str_len(s) == 1
+}

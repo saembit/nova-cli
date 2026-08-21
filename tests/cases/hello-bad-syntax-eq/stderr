@@ -1,0 +1,2 @@
+Error: bad flag syntax: --=x
+Run 'hello --help' for usage.

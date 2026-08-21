@@ -1,0 +1,589 @@
+/**
+ * nova/flagset.dusk
+ * The flags a command declares, a FlagSet is a registry of bool, string and int flags with optional one character shorthands, looked up by long name or shorthand and set from raw command line text one token at a time by the executor
+ * Bad input is an error value the executor reports, misuse of the library such as a duplicate flag, a getter on the wrong kind, etc. aborts with "fatal: nova: ..." on stderr
+ **/
+@paradigm oop
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import text
+
+/**
+ * FlagKind
+ * The value shapes a flag can carry
+ **/
+export enum FlagKind { KBool, KStr, KInt }
+
+/**
+ * Flag
+ * One declared flag, only the def and val pair matching kind is meaningful and the others hold zero values, the strings are borrowed from the caller's literals or argv and never freed here
+ **/
+export struct Flag {
+    name: string,
+    short: string,
+    kind: FlagKind,
+    help: string,
+    defB: bool,
+    defS: string,
+    defI: int64,
+    valB: bool,
+    valS: string,
+    valI: int64,
+    changed: bool,
+    required: bool,
+    hidden: bool,
+    deprecated: string,
+}
+
+/**
+ * FlagSet
+ * A set of flags in declaration order, build with flagsetNew() and pass by pointer, the set is never freed
+ **/
+export struct FlagSet {
+    items: *Vector<*Flag>,
+}
+
+/**
+ * flagsetNew
+ * Makes a fresh empty heap FlagSet
+ * @return a pointer to the new set
+ **/
+export func flagsetNew() -> *FlagSet {
+    // The empty item vector
+    v: *Vector<*Flag> = alloc(vec_new())
+
+    // Return the new set
+    return alloc(FlagSet { items: v })
+}
+
+/**
+ * flagKindWord
+ * Gives the type word help prints after a flag name, "" for bool, "string" or "int"
+ * @param k {FlagKind} - the kind
+ * @return a static literal
+ **/
+export func flagKindWord(k: FlagKind) -> string {
+    // Pick the word by kind
+    match k {
+        KBool => return "",
+        KStr => return "string",
+        KInt => return "int",
+    }
+}
+
+/**
+ * flagKindEq
+ * Checks if two kinds are the same variant since enums do not compare with ==
+ * @param a {FlagKind} - the first kind
+ * @param b {FlagKind} - the second kind
+ * @return true when they match
+ **/
+export func flagKindEq(a: FlagKind, b: FlagKind) -> bool {
+    // Match a then b
+    match a {
+        KBool => { match b { KBool => return true, KStr => return false, KInt => return false } },
+        KStr => { match b { KBool => return false, KStr => return true, KInt => return false } },
+        KInt => { match b { KBool => return false, KStr => return false, KInt => return true } },
+    }
+}
+
+/**
+ * flagParseBool
+ * Parses a boolean word the way "--flag=value" accepts it, true/false, 1/0, t/f, yes/no, y/n, case insensitive
+ * @param raw {string} - the text, borrowed
+ * @return the value and an error, the error message is "expected a boolean" on bad text
+ **/
+export func flagParseBool(raw: string) -> (bool, error) {
+    // The lower cased text
+    low: string = to_lower(raw)
+
+    // Whether the text matched and the value it gave
+    mut ok: bool = false
+    mut val: bool = false
+
+    // Check the true words then the false words
+    if low == "true" || low == "1" || low == "t" || low == "yes" || low == "y" {
+        ok = true
+        val = true
+    } else if low == "false" || low == "0" || low == "f" || low == "no" || low == "n" {
+        ok = true
+        val = false
+    }
+
+    // Free the lower cased copy
+    free(low)
+
+    // Return the value on a match
+    if ok {
+        return (val, error {})
+    }
+
+    // Return the error for bad text
+    return (false, error { message: "expected a boolean" })
+}
+
+/**
+ * flagInvalidArg
+ * Builds the Cobra style invalid argument "raw" for "--name" flag: <why> error
+ * @param raw {string} - the bad text
+ * @param name {string} - the long flag name
+ * @param why {string} - the reason
+ * @return the error holding the message
+ **/
+func flagInvalidArg(raw: string, name: string, why: string) -> error {
+    // The quoted raw text
+    q: string = textQuote(raw)
+
+    // The full message
+    msg: string = "invalid argument " + q + " for \"--" + name + "\" flag: " + why
+
+    // Free the quoted copy
+    free(q)
+
+    // Return the error with the message
+    return error { message: msg }
+}
+
+/**
+ * flagMake
+ * Makes a fresh heap Flag of the given kind with its value set to its default
+ * @param name {string} - the long name
+ * @param short {string} - the shorthand or ""
+ * @param kind {FlagKind} - the kind
+ * @param help {string} - the help text
+ * @param defB {bool} - the bool default
+ * @param defS {string} - the string default
+ * @param defI {int64} - the int default
+ * @return a pointer to the new flag
+ **/
+func flagMake(name: string, short: string, kind: FlagKind, help: string, defB: bool, defS: string, defI: int64) -> *Flag {
+    // Return the new flag with the value equal to the default
+    return alloc(Flag {
+        name: name, short: short, kind: kind, help: help,
+        defB: defB, defS: defS, defI: defI,
+        valB: defB, valS: defS, valI: defI,
+        changed: false, required: false, hidden: false, deprecated: "",
+    })
+}
+
+impl FlagSet {
+    /**
+     * len
+     * Gives the number of flags declared
+     * @return the count
+     **/
+    func len() -> int64 {
+        // The item vector
+        items: *Vector<*Flag> = self.items
+
+        // Return the length
+        return vec_len(items)
+    }
+
+    /**
+     * get
+     * Gives the flag at index i, aborts when out of range
+     * @param i {int64} - the index
+     * @return the flag
+     **/
+    func get(i: int64) -> *Flag {
+        // The item vector
+        items: *Vector<*Flag> = self.items
+
+        // Return the flag at i
+        return vec_get(items, i)
+    }
+
+    /**
+     * find
+     * Finds the index of the flag with long name name
+     * @param name {string} - the long name
+     * @return the index or -1
+     **/
+    func find(name: string) -> int64 {
+        // The item vector
+        items: *Vector<*Flag> = self.items
+
+        // Loop over the flags in the set
+        mut i: int64 = 0
+        while i < vec_len(items) {
+            // The current flag
+            f: *Flag = vec_get(items, i)
+
+            // Return the index on a name match
+            if (*f).name == name {
+                return i
+            }
+            i = i + 1
+        }
+
+        // Not found
+        return -1
+    }
+
+    /**
+     * findShort
+     * Finds the index of the flag with shorthand short, "" never matches
+     * @param short {string} - the shorthand
+     * @return the index or -1
+     **/
+    func findShort(short: string) -> int64 {
+        // An empty shorthand matches nothing
+        if short == "" {
+            return -1
+        }
+
+        // The item vector
+        items: *Vector<*Flag> = self.items
+
+        // Loop over the flags in the set
+        mut i: int64 = 0
+        while i < vec_len(items) {
+            // The current flag
+            f: *Flag = vec_get(items, i)
+
+            // Return the index on a shorthand match
+            if (*f).short == short {
+                return i
+            }
+            i = i + 1
+        }
+
+        // Not found
+        return -1
+    }
+
+    /**
+     * has
+     * Checks if a flag with long name name exists
+     * @param name {string} - the long name
+     * @return true when found
+     **/
+    func has(name: string) -> bool {
+        // Look the name up
+        return self.find(name) >= 0
+    }
+
+    /**
+     * checkNew
+     * Aborts on a duplicate long name, a duplicate shorthand or a shorthand longer than one character
+     * @param name {string} - the long name
+     * @param short {string} - the shorthand or ""
+     * @return nothing
+     **/
+    func checkNew(name: string, short: string) -> void {
+        // A duplicate long name is a fault
+        if self.find(name) >= 0 {
+            novaFault("flag '--", name, "' already defined")
+        }
+
+        // Check the shorthand when there is one
+        if short != "" {
+            // The shorthand must be one character
+            if !textIsOneChar(short) {
+                novaFault("shorthand for flag '--", name, "' must be one character")
+            }
+
+            // The index of a flag already using the shorthand or -1
+            j: int64 = self.findShort(short)
+
+            // A duplicate shorthand is a fault
+            if j >= 0 {
+                other: *Flag = self.get(j)
+                novaFault("shorthand '-" + short + "' already used for flag '--", (*other).name, "'")
+            }
+        }
+    }
+
+    /**
+     * addBool
+     * Declares a bool flag
+     * @param name {string} - the long name
+     * @param short {string} - one character or ""
+     * @param def {bool} - the default
+     * @param help {string} - the help text
+     * @return nothing
+     **/
+    func addBool(name: string, short: string, def: bool, help: string) -> void {
+        // Check the names are free
+        self.checkNew(name, short)
+
+        // The item vector
+        items: *Vector<*Flag> = self.items
+
+        // Push the new flag
+        vec_push(items, flagMake(name, short, FlagKind.KBool, help, def, "", 0))
+    }
+
+    /**
+     * addStr
+     * Declares a string flag
+     * @param name {string} - the long name
+     * @param short {string} - one character or ""
+     * @param def {string} - the default
+     * @param help {string} - the help text
+     * @return nothing
+     **/
+    func addStr(name: string, short: string, def: string, help: string) -> void {
+        // Check the names are free
+        self.checkNew(name, short)
+
+        // The item vector
+        items: *Vector<*Flag> = self.items
+
+        // Push the new flag
+        vec_push(items, flagMake(name, short, FlagKind.KStr, help, false, def, 0))
+    }
+
+    /**
+     * addInt
+     * Declares an int flag
+     * @param name {string} - the long name
+     * @param short {string} - one character or ""
+     * @param def {int64} - the default
+     * @param help {string} - the help text
+     * @return nothing
+     **/
+    func addInt(name: string, short: string, def: int64, help: string) -> void {
+        // Check the names are free
+        self.checkNew(name, short)
+
+        // The item vector
+        items: *Vector<*Flag> = self.items
+
+        // Push the new flag
+        vec_push(items, flagMake(name, short, FlagKind.KInt, help, false, "", def))
+    }
+
+    /**
+     * require
+     * Gives the flag named name, aborts when it is not declared
+     * @param name {string} - the long name
+     * @return the flag
+     **/
+    func require(name: string) -> *Flag {
+        // The index of the flag or -1
+        i: int64 = self.find(name)
+
+        // A missing flag is a fault
+        if i < 0 {
+            novaFault("no flag named '--", name, "'")
+        }
+
+        // Return the flag
+        return self.get(i)
+    }
+
+    /**
+     * requireKind
+     * Gives the flag named name, aborts unless it is declared with kind kind
+     * @param name {string} - the long name
+     * @param kind {FlagKind} - the kind it must have
+     * @param word {string} - the kind word used in the fault message
+     * @return the flag
+     **/
+    func requireKind(name: string, kind: FlagKind, word: string) -> *Flag {
+        // The index of the flag or -1
+        i: int64 = self.find(name)
+
+        // A missing flag is a fault
+        if i < 0 {
+            novaFault("no " + word + " flag named '--", name, "'")
+        }
+
+        // The flag
+        f: *Flag = self.get(i)
+
+        // The wrong kind is the same fault
+        if !flagKindEq((*f).kind, kind) {
+            novaFault("no " + word + " flag named '--", name, "'")
+        }
+
+        // Return the flag
+        return f
+    }
+
+    /**
+     * markRequired
+     * Marks name as required, the executor errors when it is not set
+     * @param name {string} - the long name
+     * @return nothing
+     **/
+    func markRequired(name: string) -> void {
+        // The flag
+        f: *Flag = self.require(name)
+
+        // Set the required bit
+        (*f).required = true
+    }
+
+    /**
+     * markHidden
+     * Hides name from help output
+     * @param name {string} - the long name
+     * @return nothing
+     **/
+    func markHidden(name: string) -> void {
+        // The flag
+        f: *Flag = self.require(name)
+
+        // Set the hidden bit
+        (*f).hidden = true
+    }
+
+    /**
+     * markDeprecated
+     * Marks name deprecated with a message shown when it is used, the flag is hidden from help
+     * @param name {string} - the long name
+     * @param msg {string} - the message
+     * @return nothing
+     **/
+    func markDeprecated(name: string, msg: string) -> void {
+        // The flag
+        f: *Flag = self.require(name)
+
+        // Store the message
+        (*f).deprecated = msg
+    }
+
+    /**
+     * getBool
+     * Gives the value of the bool flag name, aborts unless such a bool flag exists
+     * @param name {string} - the long name
+     * @return the value
+     **/
+    func getBool(name: string) -> bool {
+        // The flag checked for kind
+        f: *Flag = self.requireKind(name, FlagKind.KBool, "bool")
+
+        // Return the bool value
+        return (*f).valB
+    }
+
+    /**
+     * getStr
+     * Gives the value of the string flag name, aborts unless such a string flag exists
+     * @param name {string} - the long name
+     * @return the value
+     **/
+    func getStr(name: string) -> string {
+        // The flag checked for kind
+        f: *Flag = self.requireKind(name, FlagKind.KStr, "string")
+
+        // Return the string value
+        return (*f).valS
+    }
+
+    /**
+     * getInt
+     * Gives the value of the int flag name, aborts unless such an int flag exists
+     * @param name {string} - the long name
+     * @return the value
+     **/
+    func getInt(name: string) -> int64 {
+        // The flag checked for kind
+        f: *Flag = self.requireKind(name, FlagKind.KInt, "int")
+
+        // Return the int value
+        return (*f).valI
+    }
+
+    /**
+     * changed
+     * Checks if name was set on the command line, aborts when not declared
+     * @param name {string} - the long name
+     * @return true when set
+     **/
+    func changed(name: string) -> bool {
+        // The flag
+        f: *Flag = self.require(name)
+
+        // Return the changed bit
+        return (*f).changed
+    }
+
+    /**
+     * setValue
+     * Parses raw per the kind of flag i, stores it and marks the flag changed, raw is borrowed and kept as the string value
+     * @param i {int64} - the flag index
+     * @param raw {string} - the text from the command line
+     * @return a clean error, or the Cobra style invalid argument message
+     **/
+    func setValue(i: int64, raw: string) -> error {
+        // The flag
+        f: *Flag = self.get(i)
+
+        // Parse and store by kind
+        match (*f).kind {
+            KBool => {
+                // Parse the bool word
+                b, e := flagParseBool(raw)
+                if e.exists() {
+                    return flagInvalidArg(raw, (*f).name, "expected a boolean")
+                }
+                (*f).valB = b
+            },
+            KStr => {
+                // Keep the raw text as the value
+                (*f).valS = raw
+            },
+            KInt => {
+                // Parse the int
+                n, e := parse_int(raw)
+                if e.exists() {
+                    return flagInvalidArg(raw, (*f).name, "expected an integer")
+                }
+                (*f).valI = n
+            },
+        }
+
+        // Mark the flag as set
+        (*f).changed = true
+
+        // Return a clean error
+        return error {}
+    }
+
+    /**
+     * setBoolOn
+     * Sets a bare bool flag seen on the command line to true and marks it changed
+     * @param i {int64} - the flag index
+     * @return nothing
+     **/
+    func setBoolOn(i: int64) -> void {
+        // The flag
+        f: *Flag = self.get(i)
+
+        // Set the value and the changed bit
+        (*f).valB = true
+        (*f).changed = true
+    }
+
+    /**
+     * reset
+     * Restores every flag to its default and clears changed
+     * @return nothing
+     **/
+    func reset() -> void {
+        // The item vector
+        items: *Vector<*Flag> = self.items
+
+        // Loop over the flags in the set
+        mut i: int64 = 0
+        while i < vec_len(items) {
+            // The current flag
+            f: *Flag = vec_get(items, i)
+
+            // Copy the defaults back over the values
+            (*f).valB = (*f).defB
+            (*f).valS = (*f).defS
+            (*f).valI = (*f).defI
+
+            // Clear the changed bit
+            (*f).changed = false
+            i = i + 1
+        }
+    }
+}
