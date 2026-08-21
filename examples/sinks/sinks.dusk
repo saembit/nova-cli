@@ -1,0 +1,264 @@
+// sinks is a nova application that catches everything the library prints in two
+// string builders instead of letting it reach the terminal, so the goldens show
+// which stream each message went to. Build it from this directory with
+// dusk build sinks.dusk, the nova entry beside this file is a symlink to the
+// library at the repository root.
+//
+// The root sets a Buffer sink on out and on err, every command under it inherits
+// both, and main prints the two buffers with markers around them once
+// novaExecuteE has returned the exit code and the error it reported.
+@paradigm procedural
+
+// The nova library: the command tree, the run context, the sinks, flags,
+// argument rules and the executor
+@import nova.command
+@import nova.context
+@import nova.sink
+@import nova.flagset
+@import nova.args
+@import nova.exec
+
+// The string builders the two sinks fill
+@import std.string
+
+/**
+ * runSay
+ * Prints its one positional argument through the out sink of the chain
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runSay(ctx: *Context) -> int32 {
+    // The text to say, caught by the root's out buffer rather than the terminal
+    ctx.println("say: " + ctx.arg(0))
+
+    // Saying something cannot fail
+    return 0
+}
+
+/**
+ * runCheck
+ * Checks one name and hands an error back for the one name it refuses, the RunE form of a handler
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return error - clean for any name but "bad", which nova reports and turns into exit code 1
+ **/
+func runCheck(ctx: *Context) -> error {
+    // The name to check
+    name: string = ctx.arg(0)
+
+    // Say what is being checked, on the out sink
+    ctx.println("check: " + name)
+
+    // The one name this command refuses
+    if name == "bad" {
+        return error { message: "cannot check \"bad\"" }
+    }
+
+    // Any other name passes
+    return error {}
+}
+
+/**
+ * runGuide
+ * Prints the flag the wrapped command carries so the command has something to run
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runGuide(ctx: *Context) -> int32 {
+    // The width flag, which the wrapped help block describes at length
+    ctx.println("guide: format=" + ctx.getStr("format"))
+
+    // Nothing here can fail
+    return 0
+}
+
+/**
+ * helpPlain
+ * The custom help func of the plain command, two lines in place of the whole rendered block
+ * @param ctx {*Context} - the context naming the command help was asked for
+ * @return nothing
+ **/
+func helpPlain(ctx: *Context) -> void {
+    // The line that stands in for the Cobra layout
+    ctx.println("plain: a help func of its own, no rendered block here")
+
+    // The path, which shows the func is given the command help was asked for
+    ctx.println("plain: the command is " + ctx.commandPath())
+}
+
+/**
+ * sayCmd
+ * Builds the say command, whose output goes to the inherited out buffer
+ * @return *Command - the say subcommand
+ **/
+func sayCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("say <text>", "Print one word through the out sink")
+
+    // Exactly one positional argument, the text
+    c.setArgs(argsExact(1))
+
+    // The handler
+    c.setRun(runSay)
+
+    // Hand the finished command back to the caller
+    return c
+}
+
+/**
+ * checkCmd
+ * Builds the check command, whose handler is the error returning form
+ * @return *Command - the check subcommand
+ **/
+func checkCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("check <name>", "Refuse one name and hand the error back")
+
+    // Exactly one positional argument, the name
+    c.setArgs(argsExact(1))
+
+    // The handler that returns an error instead of a code
+    c.setRunE(runCheck)
+
+    // Hand the finished command back to the caller
+    return c
+}
+
+/**
+ * guideCmd
+ * Builds the guide command, the one whose help is wrapped at a column
+ * @return *Command - the guide subcommand
+ **/
+func guideCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("guide", "Show what a wrapped help block looks like")
+
+    // No positional arguments
+    c.setArgs(argsNone())
+
+    // One long paragraph, which the renderer breaks at the column below
+    c.setLong("guide carries a description long enough that it has to be broken across several lines before it is printed, which is what setWrapWidth asks the renderer to do, and it carries a flag whose help text is just as long so the continuation lines line up under the description column.")
+
+    // The column both the description and the flag help are wrapped at
+    c.setWrapWidth(60)
+
+    // The flag whose help text is long enough to wrap along with it
+    c.localFlags().addStr("format", "f", "text", "the format the guide is written in, which is described here at enough length that the line has to be broken and continued under the description column")
+
+    // The handler
+    c.setRun(runGuide)
+
+    // Hand the finished command back to the caller
+    return c
+}
+
+/**
+ * plainCmd
+ * Builds the plain command, which prints its help through a func of its own
+ * @return *Command - the plain subcommand
+ **/
+func plainCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("plain", "Print help through a help func of its own")
+
+    // No positional arguments
+    c.setArgs(argsNone())
+
+    // The func that prints help for this command and anything under it
+    c.setHelpFunc(helpPlain)
+
+    // The handler
+    c.setRun(runGuide)
+
+    // The flag the handler reads, since it shares one with guide
+    c.localFlags().addStr("format", "f", "text", "the format to print")
+
+    // Hand the finished command back to the caller
+    return c
+}
+
+/**
+ * sinksCmd
+ * Builds the root command and points its out and err sinks at the two builders
+ * @param outbuf {*StringBuilder} - the builder every out message lands in, borrowed
+ * @param errbuf {*StringBuilder} - the builder every err message lands in, borrowed
+ * @return *Command - the root command, ready for novaExecuteE
+ **/
+func sinksCmd(outbuf: *StringBuilder, errbuf: *StringBuilder) -> *Command {
+    // The root command, name and one line description
+    c: *Command = cmdNew("sinks", "Catch everything nova prints in two buffers")
+
+    // The long description shown by sinks --help, itself caught by the out buffer
+    c.setLong("sinks sends help, handler output and errors to string builders\ninstead of the terminal.\n\nEverything between the markers main prints came out of a buffer.")
+
+    // The version, so the root grows a --version flag that goes to the same buffer
+    c.setVersion("0.2.0")
+
+    // Help, the version line and handler output land here
+    c.setOut(Sink.Buffer(outbuf))
+
+    // Errors, usage hints and deprecation warnings land here
+    c.setErr(Sink.Buffer(errbuf))
+
+    // The four commands worth looking at
+    c.addCommand(sayCmd())
+    c.addCommand(checkCmd())
+    c.addCommand(guideCmd())
+    c.addCommand(plainCmd())
+
+    // Hand the finished tree back to the caller
+    return c
+}
+
+/**
+ * dump
+ * Prints one buffer to the real stdout between a pair of markers
+ * @param label {string} - the name of the buffer, such as "out"
+ * @param sb {*StringBuilder} - the buffer to print, borrowed
+ * @return nothing
+ **/
+func dump(label: string, sb: *StringBuilder) -> void {
+    // The marker that opens the block
+    println("---- {} ({} bytes) ----", label, sb_size(sb))
+
+    // Whatever the sink caught, printed verbatim
+    print(sb_cstr(sb))
+
+    // The marker that closes the block
+    println("---- end {} ----", label)
+}
+
+/**
+ * main
+ * Builds the command tree, runs it with novaExecuteE and prints what the two sinks caught
+ * @param argc {int32} - the argument count, unused here
+ * @param argv {string[]} - the raw command line, program name first
+ * @return int32 - the exit code novaExecuteE produced
+ **/
+func main(argc: int32, argv: string[]) -> int32 {
+    // The two buffers the root's sinks fill
+    outbuf: *StringBuilder = alloc(sb_new())
+    errbuf: *StringBuilder = alloc(sb_new())
+
+    // The command tree, a root plus four subcommands
+    root: *Command = sinksCmd(outbuf, errbuf)
+
+    // Parse argv against the tree, run the matching command and take back both results
+    code, e := novaExecuteE(root, argv)
+
+    // What the out sink caught, then what the err sink caught
+    dump("out", outbuf)
+    dump("err", errbuf)
+
+    // The exit code novaExecuteE produced
+    println("---- code {} ----", code)
+
+    // The error it handed back, already reported through the err sink above
+    if e.exists() {
+        println("---- error: " + e.message + " ----")
+    } else {
+        println("---- error: none ----")
+    }
+
+    // Hand the exit code to the shell
+    return code
+}

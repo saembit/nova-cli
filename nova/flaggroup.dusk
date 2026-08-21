@@ -1,0 +1,174 @@
+/**
+ * nova/flaggroup.dusk
+ * The flag groups a command declares, a FlagGroup is one rule over a list of long flag names and flagGroupCheck reports the Cobra message a run breaks
+ * The names are fresh heap strings the group owns, split off the comma separated list the mark methods take, novaFreeTree frees them along with the group
+ **/
+@paradigm oop
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import flagset
+@import command
+@import context
+
+/**
+ * GroupKind
+ * The rules a flag group can carry
+ **/
+export enum GroupKind { GTogether, GOneRequired, GExclusive }
+
+/**
+ * FlagGroup
+ * One rule over the long names it lists, the names are kept in declaration order and every one of them is a fresh heap string the group owns
+ **/
+export struct FlagGroup {
+    kind: GroupKind,
+    names: *Vector<string>,
+}
+
+/**
+ * flagGroupNew
+ * Makes a group of one rule from a comma separated list of long names
+ * @param kind {GroupKind} - the rule the group carries
+ * @param names {string} - the long names without dashes, comma separated, borrowed
+ * @return a pointer to the new group, whose names are fresh heap strings
+ **/
+export func flagGroupNew(kind: GroupKind, names: string) -> *FlagGroup {
+    // The list split on commas, every part a fresh heap string
+    parts: *Vector<string> = str_split(names, ",")
+
+    // Return the new group
+    return alloc(FlagGroup { kind: kind, names: parts })
+}
+
+/**
+ * flagGroupBracket
+ * Joins names with single spaces inside one pair of square brackets, the shape Cobra prints a group in
+ * @param v {*Vector<string>} - the names, borrowed
+ * @return a fresh heap string, "[]" for an empty vector
+ **/
+func flagGroupBracket(v: *Vector<string>) -> string {
+    // The names joined with single spaces
+    joined: string = str_join(v, " ")
+
+    // The joined names wrapped in brackets
+    out: string = "[" + joined + "]"
+
+    // Free the joined copy
+    free(joined)
+
+    // Return the bracketed list
+    return out
+}
+
+/**
+ * flagGroupIsSet
+ * Checks if the flag named name was set on the command line, resolved along the chain the way a getter resolves it
+ * @param chain {*Vector<*Command>} - the commands root..leaf, borrowed
+ * @param name {string} - the long name without dashes
+ * @return true when the chain declares the flag and the run changed it
+ **/
+func flagGroupIsSet(chain: *Vector<*Command>, name: string) -> bool {
+    // The set holding the flag, its index and whether the chain declares it at all
+    fset, i, found := ctxLookupChain(chain, name)
+
+    // A name no command on the chain declares counts as unset
+    if !found || i < 0 {
+        return false
+    }
+
+    // The flag itself
+    f: *Flag = fset.get(i)
+
+    // Return whether the run set it
+    return (*f).changed
+}
+
+/**
+ * flagGroupCheck
+ * Checks one group against a run, "set" meaning the flag was changed on the command line, the names resolved along the chain
+ * @param chain {*Vector<*Command>} - the commands root..leaf, borrowed
+ * @param group {*FlagGroup} - the group to check, borrowed
+ * @return a clean error when the group holds, or the Cobra message for the rule it broke
+ **/
+export func flagGroupCheck(chain: *Vector<*Command>, group: *FlagGroup) -> error {
+    // The names the group lists
+    names: *Vector<string> = (*group).names
+
+    // The names the run set and the names it left alone, both in declaration order
+    setNames: *Vector<string> = alloc(vec_new())
+    unset: *Vector<string> = alloc(vec_new())
+
+    // Loop over the names in declaration order
+    mut i: int64 = 0
+    while i < vec_len(names) {
+        // The current name
+        name: string = vec_get(names, i)
+
+        // Sort the name by whether the run set it
+        if flagGroupIsSet(chain, name) {
+            vec_push(setNames, name)
+        } else {
+            vec_push(unset, name)
+        }
+        i = i + 1
+    }
+
+    // The whole group as Cobra spells it out
+    all: string = flagGroupBracket(names)
+
+    // The message the run earned, empty while the group holds
+    mut msg: string = ""
+
+    // Pick the message by the rule the group carries
+    match (*group).kind {
+        GTogether => {
+            // Some set and some not is the only failure
+            if vec_len(setNames) > 0 && vec_len(unset) > 0 {
+                // The names the run left out
+                miss: string = flagGroupBracket(unset)
+
+                // The message naming the group and what is missing from it
+                msg = "if any flags in the group " + all + " are set they must all be set; missing " + miss
+
+                // Free the list of missing names
+                free(miss)
+            }
+        }
+        GOneRequired => {
+            // None set is the failure
+            if vec_len(setNames) == 0 {
+                msg = "at least one of the flags in the group " + all + " is required"
+            }
+        }
+        GExclusive => {
+            // More than one set is the failure
+            if vec_len(setNames) > 1 {
+                // The names the run did set
+                had: string = flagGroupBracket(setNames)
+
+                // The message naming the group and the names that clashed
+                msg = "if any flags in the group " + all + " are set none of the others can be; " + had + " were all set"
+
+                // Free the list of names that were set
+                free(had)
+            }
+        }
+    }
+
+    // Free the bracketed group and the two working vectors
+    free(all)
+    vec_free(setNames)
+    free(setNames)
+    vec_free(unset)
+    free(unset)
+
+    // A group that holds gives a clean error
+    if msg == "" {
+        return error {}
+    }
+
+    // Return the message the rule produced
+    return error { message: msg }
+}

@@ -1,0 +1,2 @@
+Error: if any flags in the group [json yaml] are set none of the others can be; [json yaml] were all set
+Run 'groups emit --help' for usage.

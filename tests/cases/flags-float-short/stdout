@@ -1,0 +1,5 @@
+rate=0.5
+tags=[a,b]
+exclude=[]
+emit=llvm
+verbose=0

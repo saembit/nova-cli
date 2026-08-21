@@ -1,0 +1,8 @@
+---- out (0 bytes) ----
+---- end out ----
+---- err (70 bytes) ----
+Error: accepts 1 arg(s), received 0
+Run 'sinks say --help' for usage.
+---- end err ----
+---- code 1 ----
+---- error: accepts 1 arg(s), received 0 ----

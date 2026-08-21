@@ -10,6 +10,7 @@
 @import std.vector
 @import flagset
 @import text
+@import sink
 @import command
 @import help
 
@@ -205,7 +206,7 @@ impl Context {
 
     /**
      * getStr
-     * Gives the value of the string flag name as resolved along the chain
+     * Gives the value of the string or choice flag name as resolved along the chain
      * @param name {string} - the long name
      * @return the value
      **/
@@ -235,6 +236,57 @@ impl Context {
 
         // Return the value from the set
         return fset.getInt(name)
+    }
+
+    /**
+     * getFloat
+     * Gives the value of the float flag name as resolved along the chain
+     * @param name {string} - the long name
+     * @return the value
+     **/
+    func getFloat(name: string) -> float64 {
+        // The chain
+        chain: *Vector<*Command> = self.chain
+
+        // The set that holds the flag
+        fset: *FlagSet = ctxRequire(chain, name)
+
+        // Return the value from the set
+        return fset.getFloat(name)
+    }
+
+    /**
+     * getStrs
+     * Gives the items of the string slice flag name as resolved along the chain
+     * @param name {string} - the long name
+     * @return the items, borrowed from the flag and never freed by the caller
+     **/
+    func getStrs(name: string) -> *Vector<string> {
+        // The chain
+        chain: *Vector<*Command> = self.chain
+
+        // The set that holds the flag
+        fset: *FlagSet = ctxRequire(chain, name)
+
+        // Return the value from the set
+        return fset.getStrs(name)
+    }
+
+    /**
+     * getCount
+     * Gives how many times the count flag name was named, as resolved along the chain
+     * @param name {string} - the long name
+     * @return the count
+     **/
+    func getCount(name: string) -> int64 {
+        // The chain
+        chain: *Vector<*Command> = self.chain
+
+        // The set that holds the flag
+        fset: *FlagSet = ctxRequire(chain, name)
+
+        // Return the value from the set
+        return fset.getCount(name)
     }
 
     /**
@@ -268,64 +320,141 @@ impl Context {
     }
 
     /**
+     * print
+     * Writes text to the out sink of the chain, nothing is added to it
+     * @param s {string} - the text, borrowed
+     * @return nothing
+     **/
+    func print(s: string) -> void {
+        // The chain
+        chain: *Vector<*Command> = self.chain
+
+        // Write the text as it stands
+        sinkWrite(sinkResolveOut(chain), s)
+    }
+
+    /**
+     * println
+     * Writes text to the out sink of the chain with a newline after it
+     * @param s {string} - the text, borrowed
+     * @return nothing
+     **/
+    func println(s: string) -> void {
+        // The chain
+        chain: *Vector<*Command> = self.chain
+
+        // The text with its newline
+        line: string = s + "\n"
+
+        // Write the line and free the copy
+        sinkWrite(sinkResolveOut(chain), line)
+        free(line)
+    }
+
+    /**
+     * eprint
+     * Writes text to the err sink of the chain, nothing is added to it
+     * @param s {string} - the text, borrowed
+     * @return nothing
+     **/
+    func eprint(s: string) -> void {
+        // The chain
+        chain: *Vector<*Command> = self.chain
+
+        // Write the text as it stands
+        sinkWrite(sinkResolveErr(chain), s)
+    }
+
+    /**
+     * eprintln
+     * Writes text to the err sink of the chain with a newline after it
+     * @param s {string} - the text, borrowed
+     * @return nothing
+     **/
+    func eprintln(s: string) -> void {
+        // The chain
+        chain: *Vector<*Command> = self.chain
+
+        // The text with its newline
+        line: string = s + "\n"
+
+        // Write the line and free the copy
+        sinkWrite(sinkResolveErr(chain), line)
+        free(line)
+    }
+
+    /**
      * printHelp
-     * Prints the running command's help to stdout
+     * Prints the running command's help through the nearest help func on the chain, or the default renderer to the out sink
      * @return nothing
      **/
     func printHelp() -> void {
-        // The running command and the chain
-        c: *Command = self.cmd
-        chain: *Vector<*Command> = self.chain
+        // A context of the same shape, since a method cannot hand its own receiver on as a pointer
+        tmp: *Context = alloc(Context { cmd: self.cmd, root: self.root, chain: self.chain, args: self.args, argv: self.argv })
 
-        // Print the help
-        helpPrint(c, chain)
+        // Print the help through whatever the chain resolves to
+        helpDispatch(tmp)
+
+        // Free the copy
+        free(tmp)
     }
 
     /**
      * printUsage
-     * Prints the running command's usage block to stderr
+     * Prints the running command's usage block through the nearest usage func on the chain, or the default renderer to the err sink
      * @return nothing
      **/
     func printUsage() -> void {
-        // The running command and the chain
-        c: *Command = self.cmd
-        chain: *Vector<*Command> = self.chain
+        // A context of the same shape, since a method cannot hand its own receiver on as a pointer
+        tmp: *Context = alloc(Context { cmd: self.cmd, root: self.root, chain: self.chain, args: self.args, argv: self.argv })
 
-        // Print the usage
-        usagePrint(c, chain)
+        // Print the usage through whatever the chain resolves to
+        usageDispatch(tmp)
+
+        // Free the copy
+        free(tmp)
     }
 
     /**
      * fail
-     * Reports an error the Cobra way, "Error: <msg>" on stderr and the "Run '<path> --help' for usage." hint unless the command silences usage
+     * Reports an error the Cobra way, "Error: <msg>" on the err sink and the "Run '<path> --help' for usage." hint unless the command silences usage
      * @param msg {string} - the message, borrowed
      * @return 1, the exit code to hand back
      **/
     func fail(msg: string) -> int32 {
-        // The running command
+        // The running command and the chain its sinks are resolved along
         c: *Command = self.cmd
+        chain: *Vector<*Command> = self.chain
 
         // Report against it
-        return ctxReportError(c, msg)
+        return ctxReportError(chain, c, msg)
     }
 }
 
 /**
  * ctxReportError
- * Prints "Error: <msg>" to stderr unless cmd.silenceErrors and then the hint "Run '<path> --help' for usage." unless cmd.silenceUsage
+ * Writes "Error: <msg>" to the err sink of the chain unless target.silenceErrors and then the hint "Run '<path> --help' for usage." unless target.silenceUsage
+ * @param chain {*Vector<*Command>} - the commands root..leaf the sink is resolved along, borrowed
  * @param target {*Command} - the command the error belongs to
  * @param msg {string} - the message, borrowed
  * @return 1
  **/
-export func ctxReportError(target: *Command, msg: string) -> int32 {
-    // Print the error line unless silenced
+export func ctxReportError(chain: *Vector<*Command>, target: *Command, msg: string) -> int32 {
+    // The sink the run writes its errors to
+    errs: Sink = sinkResolveErr(chain)
+
+    // Write the error line unless silenced
     if !(*target).silenceErrors {
-        printerr("Error: " + msg)
+        line: string = "Error: " + msg + "\n"
+        sinkWrite(errs, line)
+        free(line)
     }
 
-    // Print the usage hint unless silenced
+    // Write the usage hint unless silenced
     if !(*target).silenceUsage {
-        printerr("Run '" + (*target).path + " --help' for usage.")
+        hint: string = "Run '" + (*target).path + " --help' for usage.\n"
+        sinkWrite(errs, hint)
+        free(hint)
     }
 
     // Return the exit code

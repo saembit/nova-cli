@@ -231,3 +231,179 @@ export func textIsOneChar(s: string) -> bool {
     // Compare the length to 1
     return str_len(s) == 1
 }
+
+/**
+ * textPushCommas
+ * Splits s on commas with no quoting and pushes each piece onto out as a fresh heap string, an empty s pushes nothing
+ * @param out {*Vector<string>} - the vector the pieces are appended to, it takes ownership of them
+ * @param s {string} - the comma separated text, borrowed
+ * @return nothing
+ **/
+export func textPushCommas(out: *Vector<string>, s: string) -> void {
+    // An empty text is an empty list
+    if s == "" {
+        return
+    }
+
+    // The pieces, each already a fresh heap string
+    parts: *Vector<string> = str_split(s, ",")
+
+    // Move every piece from the front of parts onto out
+    while vec_len(parts) > 0 {
+        // The first piece, now owned here
+        p: string = vec_take(parts, 0)
+
+        // Hand it to out
+        vec_push(out, p)
+    }
+
+    // Free the emptied vector
+    vec_free(parts)
+    free(parts)
+}
+
+/**
+ * textCopyStrings
+ * Pushes a fresh heap copy of every string in src onto out, src is left untouched
+ * @param out {*Vector<string>} - the vector the copies are appended to, it owns them
+ * @param src {*Vector<string>} - the strings to copy, borrowed
+ * @return nothing
+ **/
+export func textCopyStrings(out: *Vector<string>, src: *Vector<string>) -> void {
+    // Loop over the strings to copy
+    mut i: int64 = 0
+    while i < vec_len(src) {
+        // The current string
+        s: string = vec_get(src, i)
+
+        // Push a fresh copy of it
+        vec_push(out, substring(s, 0, str_len(s)))
+        i = i + 1
+    }
+}
+
+/**
+ * textFreeStrings
+ * Frees every string in v and leaves the vector itself empty and usable, the caller frees the vector when it is done with it
+ * @param v {*Vector<string>} - the vector whose strings to free, it owns them
+ * @return nothing
+ **/
+export func textFreeStrings(v: *Vector<string>) -> void {
+    // Loop taking strings off the back
+    while vec_len(v) > 0 {
+        // The last string, now owned here
+        s: string = vec_take(v, vec_len(v) - 1)
+
+        // Free it
+        free(s)
+    }
+}
+
+/**
+ * textPushSpaces
+ * Pushes n spaces onto a builder, nothing when n is not positive
+ * @param sb {*StringBuilder} - the builder to append to
+ * @param n {int64} - how many spaces
+ * @return nothing
+ **/
+export func textPushSpaces(sb: *StringBuilder, n: int64) -> void {
+    // Push one space at a time
+    mut i: int64 = 0
+    while i < n {
+        sb_push_char(sb, 32)
+        i = i + 1
+    }
+}
+
+// Appends one line of text to sb, broken at single spaces so no line holds more than room bytes, every break followed by indent spaces
+func textWrapLine(sb: *StringBuilder, line: string, room: int64, indent: int64) -> void {
+    // An empty line has nothing to push
+    if line == "" {
+        return
+    }
+
+    // The words of the line, each a fresh heap string
+    words: *Vector<string> = str_split(line, " ")
+
+    // How many bytes the line holds so far, and whether a word has opened it yet
+    mut col: int64 = 0
+    mut opened: bool = false
+
+    // Loop over the words
+    mut i: int64 = 0
+    while i < vec_len(words) {
+        // The current word and its length
+        w: string = vec_get(words, i)
+        n: int64 = str_len(w)
+
+        // A run of spaces splits into empty words, which collapse to one space
+        if n == 0 {
+            i = i + 1
+            continue
+        }
+
+        // The first word opens the line, a word that still fits follows a space, anything else starts a new line
+        if !opened {
+            sb_push(sb, w)
+            col = n
+            opened = true
+        } else if col + 1 + n <= room {
+            sb_push_char(sb, 32)
+            sb_push(sb, w)
+            col = col + 1 + n
+        } else {
+            sb_push_char(sb, 10)
+            textPushSpaces(sb, indent)
+            sb_push(sb, w)
+            col = n
+        }
+        i = i + 1
+    }
+
+    // Free the split copies and the vector
+    textFreeStrings(words)
+    vec_free(words)
+    free(words)
+}
+
+/**
+ * textWrapInto
+ * Appends s to a builder wrapped at the width column, breaking on single spaces only, a word wider than the room left gets its own line and the newlines s already carries are kept
+ * @param sb {*StringBuilder} - the builder to append to
+ * @param s {string} - the text to wrap, borrowed
+ * @param width {int64} - the column to wrap at, counting the indent
+ * @param indent {int64} - how many spaces every line after a break starts with, the caller writes the first one itself
+ * @return nothing, no trailing newline is added
+ **/
+export func textWrapInto(sb: *StringBuilder, s: string, width: int64, indent: int64) -> void {
+    // How many bytes of text one line holds
+    room: int64 = width - indent
+
+    // A column that leaves no room is no column to wrap at
+    if room < 1 {
+        sb_push(sb, s)
+        return
+    }
+
+    // The lines of the text, wrapping never joins two of them
+    lines: *Vector<string> = str_split(s, "\n")
+
+    // Loop over the lines
+    mut i: int64 = 0
+    while i < vec_len(lines) {
+        // Every line after the first opens with its own break and indent
+        if i > 0 {
+            sb_push_char(sb, 10)
+            textPushSpaces(sb, indent)
+        }
+
+        // Wrap the current line into the builder
+        textWrapLine(sb, vec_get(lines, i), room, indent)
+        i = i + 1
+    }
+
+    // Free the split copies and the vector
+    textFreeStrings(lines)
+    vec_free(lines)
+    free(lines)
+}

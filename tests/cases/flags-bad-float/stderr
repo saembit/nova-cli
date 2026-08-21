@@ -1,0 +1,2 @@
+Error: invalid argument "abc" for "--rate" flag: expected a number
+Run 'flags --help' for usage.

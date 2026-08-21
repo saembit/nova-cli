@@ -1,6 +1,6 @@
 /**
  * nova/exec.dusk
- * novaExecute, the entry point an application's main calls with its root command and argv
+ * novaExecuteE and novaExecute, the entry points an application's main calls with its root command and argv
  **/
 @paradigm oop
 @paradigm procedural
@@ -8,8 +8,10 @@
 @import std.string
 @import std.vector
 @import flagset
+@import flaggroup
 @import args
 @import text
+@import sink
 @import command
 @import context
 @import help
@@ -144,13 +146,35 @@ func execCheckRequired(chain: *Vector<*Command>) -> error {
     return error { message: "required flag(s) " + joined + " not set" }
 }
 
-// Finds the index of the nearest chain entry with a persistentPreRun, or -1
+// Checks the leaf's flag groups in declaration order, the first one the run breaks wins
+func execCheckGroups(chain: *Vector<*Command>, leaf: *Command) -> error {
+    // The groups the leaf declares
+    groups: *Vector<*FlagGroup> = (*leaf).groups
+
+    // Loop over the groups in declaration order
+    mut i: int64 = 0
+    while i < vec_len(groups) {
+        // Check the current group against the run
+        gerr: error = flagGroupCheck(chain, vec_get(groups, i))
+
+        // Return the first group the run breaks
+        if gerr.exists() {
+            return gerr
+        }
+        i = i + 1
+    }
+
+    // Every group holds
+    return error {}
+}
+
+// Finds the index of the nearest chain entry with a persistentPreRun of either form, or -1
 func execNearestPpre(chain: *Vector<*Command>) -> int64 {
     // Walk the chain from the leaf up
     mut k: int64 = vec_len(chain) - 1
     while k >= 0 {
         c: *Command = vec_get(chain, k)
-        if (*c).hasPpre {
+        if (*c).hasPpre || (*c).hasPpreE {
             return k
         }
         k = k - 1
@@ -158,13 +182,13 @@ func execNearestPpre(chain: *Vector<*Command>) -> int64 {
     return -1
 }
 
-// Finds the index of the nearest chain entry with a persistentPostRun, or -1
+// Finds the index of the nearest chain entry with a persistentPostRun of either form, or -1
 func execNearestPpost(chain: *Vector<*Command>) -> int64 {
     // Walk the chain from the leaf up
     mut k: int64 = vec_len(chain) - 1
     while k >= 0 {
         c: *Command = vec_get(chain, k)
-        if (*c).hasPpost {
+        if (*c).hasPpost || (*c).hasPpostE {
             return k
         }
         k = k - 1
@@ -172,8 +196,29 @@ func execNearestPpost(chain: *Vector<*Command>) -> int64 {
     return -1
 }
 
-// Runs the hooks for ctx in order, the first nonzero code wins
-func execRunHooks(ctx: *Context) -> int32 {
+// Runs one hook slot, the E form when that is the one set, and reports an error it hands back against the leaf
+func execCallHook(ctx: *Context, hasE: bool, fe: (*Context) -> error, fi: (*Context) -> int32) -> (int32, error) {
+    // The E form, whose error nova reports itself and turns into exit code 1
+    if hasE {
+        // Run it and look at what came back
+        e: error = fe(ctx)
+
+        // An error ends the chain here
+        if e.exists() {
+            chain: *Vector<*Command> = (*ctx).chain
+            return (ctxReportError(chain, (*ctx).cmd, e.message), e)
+        }
+
+        // Nothing to report
+        return (0, error {})
+    }
+
+    // The int32 form, whose nonzero return is the exit code and no error at all
+    return (fi(ctx), error {})
+}
+
+// Runs the hooks for ctx in order, the first nonzero code or error wins
+func execRunHooks(ctx: *Context) -> (int32, error) {
     // The chain and the command that runs
     chain: *Vector<*Command> = (*ctx).chain
     curc: *Command = (*ctx).cmd
@@ -182,109 +227,123 @@ func execRunHooks(ctx: *Context) -> int32 {
     ppre: int64 = execNearestPpre(chain)
     if ppre >= 0 {
         pc: *Command = vec_get(chain, ppre)
-        f1 := (*pc).persistentPreRun
-        r1: int32 = f1(ctx)
+        r1, e1 := execCallHook(ctx, (*pc).hasPpreE, (*pc).persistentPreRunE, (*pc).persistentPreRun)
         if r1 != 0 {
-            return r1
+            return (r1, e1)
         }
+        e1.ignore()
     }
 
     // Run the preRun
-    if (*curc).hasPre {
-        f2 := (*curc).preRun
-        r2: int32 = f2(ctx)
+    if (*curc).hasPre || (*curc).hasPreE {
+        r2, e2 := execCallHook(ctx, (*curc).hasPreE, (*curc).preRunE, (*curc).preRun)
         if r2 != 0 {
-            return r2
+            return (r2, e2)
         }
+        e2.ignore()
     }
 
     // Run the command itself
-    f3 := (*curc).run
-    r3: int32 = f3(ctx)
+    r3, e3 := execCallHook(ctx, (*curc).hasRunE, (*curc).runE, (*curc).run)
     if r3 != 0 {
-        return r3
+        return (r3, e3)
     }
+    e3.ignore()
 
     // Run the postRun
-    if (*curc).hasPost {
-        f4 := (*curc).postRun
-        r4: int32 = f4(ctx)
+    if (*curc).hasPost || (*curc).hasPostE {
+        r4, e4 := execCallHook(ctx, (*curc).hasPostE, (*curc).postRunE, (*curc).postRun)
         if r4 != 0 {
-            return r4
+            return (r4, e4)
         }
+        e4.ignore()
     }
 
     // Run the nearest persistentPostRun
     ppost: int64 = execNearestPpost(chain)
     if ppost >= 0 {
         pc2: *Command = vec_get(chain, ppost)
-        f5 := (*pc2).persistentPostRun
-        return f5(ctx)
+        return execCallHook(ctx, (*pc2).hasPpostE, (*pc2).persistentPostRunE, (*pc2).persistentPostRun)
     }
-    return 0
+
+    // Every hook is done and none of them complained
+    return (0, error {})
 }
 
-// Reports the unknown command error for word against subject
-func execUnknownCommand(subject: *Command, word: string) -> int32 {
-    return ctxReportError(subject, "unknown command \"" + word + "\" for \"" + (*subject).path + "\"")
+// Reports the unknown command error for word against subject and hands it back
+func execUnknownCommand(chain: *Vector<*Command>, subject: *Command, word: string) -> (int32, error) {
+    // The message Cobra prints for a word that names no command
+    msg: string = "unknown command \"" + word + "\" for \"" + (*subject).path + "\""
+
+    // Report it against the command the word was typed under
+    return (ctxReportError(chain, subject, msg), error { message: msg })
 }
 
 /**
- * execDispatch
- * Runs both scanner passes over st and then does what argv asked for, help, version, an error report or the hooks of the command found
+ * execRunDispatch
+ * Does what the parsed line asked for, help, the version line, an error report or the hooks of the command found, everything it prints going through the sinks the chain resolves
  * @param rootc {*Command} - the root command of the tree
- * @param st {*ParseState} - the fresh scanner, borrowed, novaExecute frees it after
- * @param argv {string[]} - the raw argv handed to the Context
- * @return the exit code
+ * @param st {*ParseState} - the scanner both passes already ran over, borrowed
+ * @param ctx {*Context} - the context built for this line, borrowed
+ * @param perr {error} - what pass two reported, clean when the flags parsed
+ * @return the exit code and the error it reported, clean when there was none
  **/
-func execDispatch(rootc: *Command, st: *ParseState, argv: string[]) -> int32 {
-    // Run both passes of the scanner
-    parseFind(st)
-    perr: error = parseAll(st)
-
+func execRunDispatch(rootc: *Command, st: *ParseState, ctx: *Context, perr: error) -> (int32, error) {
     // The chain, positionals and the command found
-    chain: *Vector<*Command> = (*st).chain
-    pos: *Vector<string> = (*st).pos
-    curc: *Command = parseCur(st)
+    chain: *Vector<*Command> = (*ctx).chain
+    pos: *Vector<string> = (*ctx).args
+    curc: *Command = (*ctx).cmd
 
     // Report a flag error
     if perr.exists() {
-        return ctxReportError(curc, perr.message)
+        return (ctxReportError(chain, curc, perr.message), perr)
     }
 
     // Print help when it was asked for
     if (*st).helpRequested {
-        helpPrint(curc, chain)
-        return 0
+        helpDispatch(ctx)
+        return (0, error {})
     }
 
     // Print the version when it was asked for
     if execVersionRequested(rootc, vec_len(chain)) {
         v: string = novaVersionString(rootc)
-        println(v)
+        line: string = v + "\n"
+        sinkWrite(sinkResolveOut(chain), line)
+        free(line)
         free(v)
-        return 0
+        return (0, error {})
     }
 
     // A command without a run either has an unknown word or prints its help
-    if !(*curc).hasRun {
+    if !cmdIsRunnable(curc) {
         if vec_len(pos) > 0 {
-            return execUnknownCommand(curc, vec_get(pos, 0))
+            return execUnknownCommand(chain, curc, vec_get(pos, 0))
         }
-        helpPrint(curc, chain)
-        return 0
+        helpDispatch(ctx)
+        return (0, error {})
     }
 
     // Warn when the command is deprecated
     if (*curc).deprecated != "" {
-        printerr("Command \"" + (*curc).name + "\" is deprecated, " + (*curc).deprecated)
+        warn: string = "Command \"" + (*curc).name + "\" is deprecated, " + (*curc).deprecated + "\n"
+        sinkWrite(sinkResolveErr(chain), warn)
+        free(warn)
     }
 
-    // Check the required flags, the builtin commands are skipped
-    if !(*curc).isBuiltin {
+    // Check the required flags, which the builtins and a command that parses no flags of its own skip
+    if !(*curc).isBuiltin && !(*curc).disableFlagParsing {
         rerr: error = execCheckRequired(chain)
         if rerr.exists() {
-            return ctxReportError(curc, rerr.message)
+            return (ctxReportError(chain, curc, rerr.message), rerr)
+        }
+    }
+
+    // Check the flag groups, which the builtins and a command that parses no flags of its own skip
+    if !(*curc).isBuiltin && !(*curc).disableFlagParsing {
+        gerr: error = execCheckGroups(chain, curc)
+        if gerr.exists() {
+            return (ctxReportError(chain, curc, gerr.message), gerr)
         }
     }
 
@@ -297,28 +356,52 @@ func execDispatch(rootc: *Command, st: *ParseState, argv: string[]) -> int32 {
     // Validate the positionals against the command's args rule
     aerr: error = argsValidateFirst((*curc).args, vec_len(pos), first, (*curc).path)
     if aerr.exists() {
-        return ctxReportError(curc, aerr.message)
+        return (ctxReportError(chain, curc, aerr.message), aerr)
     }
 
-    // Build the context and run the hooks
-    ctx: *Context = alloc(Context { cmd: curc, root: rootc, chain: chain, args: pos, argv: argv })
-    code: int32 = execRunHooks(ctx)
-
-    // Free the context now that every hook is done
-    free(ctx)
-
-    // Return the hook chain's code
-    return code
+    // Run the hook chain of the command found
+    return execRunHooks(ctx)
 }
 
 /**
- * novaExecute
- * Fixes up the tree, finds the command argv names, parses its flags and runs it, the scanner state and the Context live only for this call and are freed before it returns
+ * execDispatch
+ * Runs both scanner passes over st, builds the Context the rest of the run shares and then does what argv asked for
+ * @param rootc {*Command} - the root command of the tree
+ * @param st {*ParseState} - the fresh scanner, borrowed, novaExecuteE frees it after
+ * @param argv {string[]} - the raw argv handed to the Context
+ * @return the exit code and the error it reported, clean when there was none
+ **/
+func execDispatch(rootc: *Command, st: *ParseState, argv: string[]) -> (int32, error) {
+    // Run both passes of the scanner
+    parseFind(st)
+    perr: error = parseAll(st)
+
+    // The chain, positionals and the command found
+    chain: *Vector<*Command> = (*st).chain
+    pos: *Vector<string> = (*st).pos
+    curc: *Command = parseCur(st)
+
+    // The context every path from here shares, the leaf, what is left of the line and the chain the sinks and help funcs resolve along
+    ctx: *Context = alloc(Context { cmd: curc, root: rootc, chain: chain, args: pos, argv: argv })
+
+    // Do what the line asked for
+    code, derr := execRunDispatch(rootc, st, ctx, perr)
+
+    // Free the context now that every hook and help func is done with it
+    free(ctx)
+
+    // Return the code and the error already reported
+    return (code, derr)
+}
+
+/**
+ * novaExecuteE
+ * Fixes up the tree, finds the command argv names, parses its flags and runs it, handing back the error it reported along with the exit code, the scanner state and the Context live only for this call and are freed before it returns
  * @param rootc {*Command} - the root command of the tree
  * @param argv {string[]} - the raw argv, argv[0] is the program name and is skipped
- * @return the exit code, the handler's return, 0 after help or version, 1 on a usage error
+ * @return the exit code and the error already printed per the silence flags, a clean error after help, the version line and a successful run
  **/
-export func novaExecute(rootc: *Command, argv: string[]) -> int32 {
+export func novaExecuteE(rootc: *Command, argv: string[]) -> (int32, error) {
     // Fix up the tree before scanning
     execFixup(rootc)
 
@@ -326,11 +409,27 @@ export func novaExecute(rootc: *Command, argv: string[]) -> int32 {
     st: *ParseState = parseStateNew(rootc, argv)
 
     // Scan and run
-    code: int32 = execDispatch(rootc, st, argv)
+    code, derr := execDispatch(rootc, st, argv)
 
     // Free the scanner's chain, pos and toks vectors then the scanner
     parseStateFree(st)
     free(st)
+
+    // Return the exit code and the error the run reported
+    return (code, derr)
+}
+
+/**
+ * novaExecute
+ * Runs novaExecuteE and drops the error, which nova has already reported
+ * @param rootc {*Command} - the root command of the tree
+ * @param argv {string[]} - the raw argv, argv[0] is the program name and is skipped
+ * @return the exit code, the handler's return, 0 after help or version, 1 on a usage error
+ **/
+export func novaExecute(rootc: *Command, argv: string[]) -> int32 {
+    // Run the line and drop the error, which was reported as it happened
+    code, derr := novaExecuteE(rootc, argv)
+    derr.ignore()
 
     // Return the exit code
     return code

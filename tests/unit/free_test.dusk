@@ -3,7 +3,9 @@
 // commands and the synthesized --version flag exist, then novaFreeTree frees the whole
 // thing. dusk's generational heap aborts with fatal: on a use after free or a double free,
 // so a run that reaches the last line is the proof. A second tree is freed without ever
-// being executed and a third is a bare root with nothing on it.
+// being executed and a third is a bare root with nothing on it. Two commands of the tree
+// carry flag groups, so the group names, the name vectors and the groups themselves are
+// freed along with everything else.
 // Each argv is a fixed array minted as collector<string[]> for the same reason exec_test
 // does it, novaExecute stores argv in a heap Context handed to opaque handlers.
 @paradigm oop
@@ -17,6 +19,7 @@
 @import nova.command
 @import nova.context
 @import nova.flagset
+@import nova.flaggroup
 @import nova.args
 @import nova.text
 @import nova.exec
@@ -78,6 +81,9 @@ func buildRoot() -> *Command {
     root.persistentFlags().addStr("config", "c", "", "config file")
     root.setPersistentPreRun(rootPpre)
 
+    // A group over the two persistent flags, the root is never a leaf so it only has to be freed
+    root.markFlagsMutuallyExclusive("verbose,config")
+
     // serve carries an alias, an arg rule, local flags and a deprecated flag
     serve: *Command = cmdNew("serve [flags]", "Start the server")
     serve.addAlias("s")
@@ -88,6 +94,10 @@ func buildRoot() -> *Command {
     serve.localFlags().addStr("legacy", "", "", "old option")
     serve.localFlags().markDeprecated("legacy", "use --host instead")
     serve.setRun(serveRun)
+
+    // Two groups on one command, both satisfied by the run below
+    serve.markFlagsRequiredTogether("host,port")
+    serve.markFlagsOneRequired("host,port")
     root.addCommand(serve)
 
     // greet carries valid args and a required flag
@@ -134,6 +144,16 @@ func main(argc: int32, argv: string[]) -> int32 {
 
     // The node and flag counts the walk is about to free
     println("root kids={} root flags={} root pflags={}", root.numChildren(), root.localFlags().len(), root.persistentFlags().len())
+
+    // The command carrying two of the groups the walk frees
+    sv: *Command = root.child(0)
+
+    // The group vectors of the root and of serve
+    rg: *Vector<*FlagGroup> = (*root).groups
+    sg: *Vector<*FlagGroup> = (*sv).groups
+
+    // The group counts, one on the root and two on serve
+    println("root groups={} serve groups={}", vec_len(rg), vec_len(sg))
 
     // Free the whole tree
     novaFreeTree(root)

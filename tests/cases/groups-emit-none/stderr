@@ -1,0 +1,2 @@
+Error: at least one of the flags in the group [json yaml] is required
+Run 'groups emit --help' for usage.

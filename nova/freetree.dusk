@@ -1,6 +1,6 @@
 /**
  * nova/freetree.dusk
- * novaFreeTree, frees a whole Command tree once the run is over, every node reachable from the root along with its vectors and both of its FlagSets, the strings are left alone since they are borrowed literals or argv
+ * novaFreeTree, frees a whole Command tree once the run is over, every node reachable from the root along with its vectors, its flag groups and both of its FlagSets, the strings are left alone since they are borrowed literals or argv, apart from the group names the groups own
  * The walk is a worklist taken from the back rather than recursion, a node is freed after its children are queued so no child is reached through a freed parent
  **/
 @paradigm oop
@@ -8,11 +8,12 @@
 
 @import std.vector
 @import flagset
+@import flaggroup
 @import command
 
 /**
  * freetreeFields
- * Frees what one Command node owns, its aliases, validArgs and kids vectors and both FlagSets, the node itself is left for its owner and the children must already be queued elsewhere since the kids vector goes too
+ * Frees what one Command node owns, its aliases, validArgs, kids and groups vectors and both FlagSets, the node itself is left for its owner and the children must already be queued elsewhere since the kids vector goes too
  * @param n {*Command} - the node whose fields to free
  * @return nothing
  **/
@@ -38,11 +39,41 @@ func freetreeFields(n: *Command) -> void {
     pf: *FlagSet = (*n).pflags
     pf.freeAll()
     free((*n).pflags)
+
+    // The flag group vector
+    groups: *Vector<*FlagGroup> = (*n).groups
+
+    // Loop taking groups off the back
+    while vec_len(groups) > 0 {
+        // The last group, now owned here
+        g: *FlagGroup = vec_take(groups, vec_len(groups) - 1)
+
+        // The names the group owns
+        gnames: *Vector<string> = (*g).names
+
+        // Loop taking names off the back
+        while vec_len(gnames) > 0 {
+            // The last name, a heap string the group owns
+            nm: string = vec_take(gnames, vec_len(gnames) - 1)
+
+            // Free the name
+            free(nm)
+        }
+
+        // Free the name vector then the group
+        vec_free(gnames)
+        free((*g).names)
+        free(g)
+    }
+
+    // Free the group vector
+    vec_free(groups)
+    free((*n).groups)
 }
 
 /**
  * novaFreeTree
- * Frees every Command reachable from rootc, the root included, along with each node's vectors and FlagSets, the builtin help and completion commands and the --version flag novaExecute added are nodes and flags like any other so they go too, nothing in the tree may be used after this returns
+ * Frees every Command reachable from rootc, the root included, along with each node's vectors, flag groups and FlagSets, the builtin help and completion commands and the --version flag novaExecute added are nodes and flags like any other so they go too, nothing in the tree may be used after this returns
  * @param rootc {*Command} - the root of the tree to free
  * @return nothing
  **/

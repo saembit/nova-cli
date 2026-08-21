@@ -1,0 +1,219 @@
+// groups is a nova application built around the three flag group rules, one
+// subcommand per rule plus a push command whose group mixes a local flag with a
+// persistent one its own child inherits. Build it from this directory with
+// dusk build groups.dusk, the nova entry beside this file is a symlink to the
+// library at the repository root.
+//
+// Nothing is persisted, every command prints what it would have done so the
+// golden tests stay deterministic.
+@paradigm procedural
+
+// The nova library: the command tree, the run context, flags, argument rules
+// and the executor
+@import nova.command
+@import nova.context
+@import nova.flagset
+@import nova.args
+@import nova.text
+@import nova.exec
+
+/**
+ * runLogin
+ * Prints the credentials the required together group let through
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runLogin(ctx: *Context) -> int32 {
+    // Both flags are set or neither is, nova refused the run otherwise
+    println("login: user={} pass={}", ctx.getStr("user"), ctx.getStr("pass"))
+
+    // Logging in cannot fail here
+    return 0
+}
+
+/**
+ * runEmit
+ * Prints the one format the two groups on the command allow
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runEmit(ctx: *Context) -> int32 {
+    // Exactly one of the two is set, the one required rule and the exclusive rule together say so
+    println("emit: json={} yaml={}", textBool(ctx.getBool("json")), textBool(ctx.getBool("yaml")))
+
+    // Emitting cannot fail here
+    return 0
+}
+
+/**
+ * runPush
+ * Prints the persistent remote and the local force flag the group ties together
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runPush(ctx: *Context) -> int32 {
+    // The remote lives in push's persistent set and force in its local one
+    println("push: remote={} force={}", ctx.getStr("remote"), textBool(ctx.getBool("force")))
+
+    // Pushing cannot fail here
+    return 0
+}
+
+/**
+ * runTags
+ * Prints the remote it inherited from push, which no group of its own constrains
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runTags(ctx: *Context) -> int32 {
+    // The group on push does not apply here, only the flag it named is inherited
+    println("tags: remote={} limit={}", ctx.getStr("remote"), ctx.getInt("limit"))
+
+    // Pushing tags cannot fail here
+    return 0
+}
+
+/**
+ * loginCmd
+ * Builds the login command, whose two credential flags are required together
+ * @return *Command - the login subcommand
+ **/
+func loginCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("login", "Log in with a user and a password")
+
+    // No positional arguments
+    c.setArgs(argsNone())
+
+    // The handler
+    c.setRun(runLogin)
+
+    // The two halves of one credential
+    c.localFlags().addStr("user", "u", "", "the user to log in as")
+    c.localFlags().addStr("pass", "p", "", "the password to log in with")
+
+    // Neither half is any use without the other
+    c.markFlagsRequiredTogether("user,pass")
+
+    // Hand the finished command back to the caller
+    return c
+}
+
+/**
+ * emitCmd
+ * Builds the emit command, whose two format flags are one required and mutually exclusive at once
+ * @return *Command - the emit subcommand
+ **/
+func emitCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("emit", "Write the report in one format")
+
+    // No positional arguments
+    c.setArgs(argsNone())
+
+    // The handler
+    c.setRun(runEmit)
+
+    // The two formats the report can be written in
+    c.localFlags().addBool("json", "", false, "write JSON")
+    c.localFlags().addBool("yaml", "", false, "write YAML")
+
+    // A format is needed, and only one of them, the two rules are checked in this order
+    c.markFlagsOneRequired("json,yaml")
+    c.markFlagsMutuallyExclusive("json,yaml")
+
+    // Hand the finished command back to the caller
+    return c
+}
+
+/**
+ * tagsCmd
+ * Builds the tags command, a child of push that inherits the persistent remote
+ * @return *Command - the tags subcommand
+ **/
+func tagsCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("tags", "Push tags to the remote")
+
+    // No positional arguments
+    c.setArgs(argsNone())
+
+    // The handler
+    c.setRun(runTags)
+
+    // How many tags to push at once
+    c.localFlags().addInt("limit", "", 0, "how many tags to push")
+
+    // Hand the finished command back to the caller
+    return c
+}
+
+/**
+ * pushCmd
+ * Builds the push command, whose group ties a local flag to a persistent one, plus its tags child
+ * @return *Command - the push subcommand
+ **/
+func pushCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("push", "Push the work to a remote")
+
+    // No positional arguments
+    c.setArgs(argsNone())
+
+    // The handler
+    c.setRun(runPush)
+
+    // The remote every command under push shares
+    c.persistentFlags().addStr("remote", "r", "", "the remote to push to")
+
+    // Whether to overwrite what is already there, push's own
+    c.localFlags().addBool("force", "f", false, "overwrite the remote")
+
+    // Forcing a push means naming the remote it overwrites
+    c.markFlagsRequiredTogether("remote,force")
+
+    // The child inherits the remote but not the group
+    c.addCommand(tagsCmd())
+
+    // Hand the finished command back to the caller
+    return c
+}
+
+/**
+ * groupsCmd
+ * Builds the root command with its long help and the three commands under it
+ * @return *Command - the root command, ready for novaExecute
+ **/
+func groupsCmd() -> *Command {
+    // The root command, name and one line description
+    c: *Command = cmdNew("groups", "Show what the three flag group rules do")
+
+    // The long description shown by groups --help
+    c.setLong("groups shows the three flag group rules.\n\nlogin needs its two flags together, emit needs exactly one of its two,\nand push ties a local flag to a persistent one.")
+
+    // The version, so the root grows a --version flag
+    c.setVersion("0.2.0")
+
+    // One subcommand per rule
+    c.addCommand(loginCmd())
+    c.addCommand(emitCmd())
+    c.addCommand(pushCmd())
+
+    // Hand the finished command back to the caller
+    return c
+}
+
+/**
+ * main
+ * Builds the command tree and hands the command line to nova
+ * @param argc {int32} - the argument count, unused here
+ * @param argv {string[]} - the raw command line, program name first
+ * @return int32 - the exit code novaExecute produced
+ **/
+func main(argc: int32, argv: string[]) -> int32 {
+    // The command tree, two commands deep under push
+    root: *Command = groupsCmd()
+
+    // Parse argv against the tree, run the matching command and return its exit code
+    return novaExecute(root, argv)
+}

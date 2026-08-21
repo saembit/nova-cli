@@ -1,0 +1,27 @@
+---- out (672 bytes) ----
+sinks sends help, handler output and errors to string builders
+instead of the terminal.
+
+Everything between the markers main prints came out of a buffer.
+
+Usage:
+  sinks [command]
+
+Available Commands:
+  check       Refuse one name and hand the error back
+  completion  Generate the autocompletion script for the specified shell
+  guide       Show what a wrapped help block looks like
+  help        Help about any command
+  plain       Print help through a help func of its own
+  say         Print one word through the out sink
+
+Flags:
+  -h, --help      help for sinks
+      --version   version for sinks
+
+Use "sinks [command] --help" for more information about a command.
+---- end out ----
+---- err (0 bytes) ----
+---- end err ----
+---- code 0 ----
+---- error: none ----

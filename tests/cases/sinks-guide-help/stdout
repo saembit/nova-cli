@@ -1,0 +1,22 @@
+---- out (643 bytes) ----
+guide carries a description long enough that it has to be
+broken across several lines before it is printed, which is
+what setWrapWidth asks the renderer to do, and it carries a
+flag whose help text is just as long so the continuation
+lines line up under the description column.
+
+Usage:
+  sinks guide [flags]
+
+Flags:
+  -f, --format string   the format the guide is written in,
+                        which is described here at enough
+                        length that the line has to be
+                        broken and continued under the
+                        description column (default "text")
+  -h, --help            help for guide
+---- end out ----
+---- err (0 bytes) ----
+---- end err ----
+---- code 0 ----
+---- error: none ----

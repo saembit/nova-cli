@@ -152,6 +152,123 @@ func testFlagset() -> void {
 }
 
 /**
+ * showItems
+ * Prints one labelled list, its items joined with commas inside brackets so an empty one is still visible
+ * @param label {string} - the name the list is printed under
+ * @param v {*Vector<string>} - the items, borrowed from the flag
+ * @return void
+ **/
+func showItems(label: string, v: *Vector<string>) -> void {
+    // The items joined with commas
+    joined: string = str_join(v, ",")
+
+    // The label and the list
+    println("{} [{}]", label, joined)
+
+    // Free the joined copy
+    free(joined)
+}
+
+/**
+ * testRichKinds
+ * Exercises the float, string slice, count and choice flags, from declaration through set, reset and free
+ * @return void
+ **/
+func testRichKinds() -> void {
+    // A fresh empty set
+    fs: *FlagSet = flagsetNew()
+
+    // One flag of every kind 0.2.0 added, plus a slice that starts out empty
+    fs.addFloat("rate", "r", 1.5, "rate to apply")
+    fs.addStrs("tag", "t", "a,b", "tags to attach")
+    fs.addStrs("exclude", "x", "", "names to skip")
+    fs.addCount("verbose", "v", "verbosity, repeatable")
+    fs.addChoice("emit", "e", "llvm", "llvm,obj", "what to emit")
+
+    // How many flags the set holds
+    println("len {}", fs.len())
+
+    // The word each new kind prints as, a count printing none just like a bool
+    println("kind words: float=[{}] strs=[{}] count=[{}] choice=[{}]", flagKindWord(FlagKind.KFloat), flagKindWord(FlagKind.KStrs), flagKindWord(FlagKind.KCount), flagKindWord(FlagKind.KChoice))
+
+    // The word help prints per flag, where a choice prints its own alternatives
+    println("type words: rate=[{}] tag=[{}] verbose=[{}] emit=[{}]", flagTypeWord(fs.get(0)), flagTypeWord(fs.get(1)), flagTypeWord(fs.get(3)), flagTypeWord(fs.get(4)))
+
+    // A count swallows nothing the way a bool does, every other kind takes a value token
+    println("takes value: rate={} tag={} verbose={} emit={}", textBool(flagTakesValue(fs.get(0))), textBool(flagTakesValue(fs.get(1))), textBool(flagTakesValue(fs.get(3))), textBool(flagTakesValue(fs.get(4))))
+
+    // The float default, rendered the way dusk itself prints a float64
+    r0: float64 = fs.getFloat("rate")
+    println(f"defaults rate={r0}")
+
+    // The two slice defaults, one split out of a comma list and one empty
+    showItems("defaults tag", fs.getStrs("tag"))
+    showItems("defaults exclude", fs.getStrs("exclude"))
+
+    // The count starts at zero and the choice at its declared default, which getStr reads
+    println("defaults verbose={} emit={}", fs.getCount("verbose"), fs.getStr("emit"))
+
+    // Nothing has been set yet, so nothing counts as changed
+    println("changed before: {} {} {} {}", textBool(fs.changed("rate")), textBool(fs.changed("tag")), textBool(fs.changed("verbose")), textBool(fs.changed("emit")))
+
+    // The float parses, and text that is no number at all is rejected
+    showErr("set float", fs.setValue(0, "2.5"))
+    r1: float64 = fs.getFloat("rate")
+    println(f"rate={r1}")
+
+    // A rejected value must leave the previous one in place
+    showErr("set float bad", fs.setValue(0, "abc"))
+    r2: float64 = fs.getFloat("rate")
+    println(f"rate after bad={r2}")
+
+    // The first spelling on the line replaces the default
+    showErr("set strs first", fs.setValue(1, "x"))
+    showItems("tag", fs.getStrs("tag"))
+
+    // Every later one appends, splitting its own text on commas
+    showErr("set strs again", fs.setValue(1, "y,z"))
+    showItems("tag", fs.getStrs("tag"))
+
+    // A count is raised one at a time by bump, which is what a bare flag does
+    fs.bump(3)
+    fs.bump(3)
+    println("verbose={} changed={}", fs.getCount("verbose"), textBool(fs.changed("verbose")))
+
+    // And set outright by setValue, which is what the "=N" form does
+    showErr("set count", fs.setValue(3, "7"))
+    println("verbose={}", fs.getCount("verbose"))
+
+    // A count that is no integer is rejected the way an int flag is
+    showErr("set count bad", fs.setValue(3, "x"))
+    println("verbose after bad={}", fs.getCount("verbose"))
+
+    // A choice takes one of its alternatives
+    showErr("set choice", fs.setValue(4, "obj"))
+    println("emit={}", fs.getStr("emit"))
+
+    // And nothing else, the message listing them in declaration order
+    showErr("set choice bad", fs.setValue(4, "wasm"))
+    println("emit after bad={}", fs.getStr("emit"))
+
+    // Put every flag back to its default, the slice rebuilt out of fresh copies of it
+    fs.reset()
+
+    // The values are the declared ones again
+    r3: float64 = fs.getFloat("rate")
+    println(f"after reset rate={r3}")
+    showItems("after reset tag", fs.getStrs("tag"))
+    println("after reset verbose={} emit={}", fs.getCount("verbose"), fs.getStr("emit"))
+
+    // And the changed marks are cleared with them
+    println("changed after reset: {} {} {} {}", textBool(fs.changed("rate")), textBool(fs.changed("tag")), textBool(fs.changed("verbose")), textBool(fs.changed("emit")))
+
+    // Free the flags with the string lists they own, then the set, a double free would abort here
+    fs.freeAll()
+    free(fs)
+    println("freed ok")
+}
+
+/**
  * testBoolParse
  * Runs every bool spelling flagParseBool accepts, plus three it does not
  * @return void
@@ -290,6 +407,10 @@ func main(argc: int32, argv: string[]) -> int32 {
     // The FlagSet group
     println("== flagset ==")
     testFlagset()
+
+    // The flag kinds 0.2.0 added
+    println("== rich kinds ==")
+    testRichKinds()
 
     // The bool spellings
     println("== bool parse ==")

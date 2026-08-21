@@ -1,0 +1,158 @@
+// flags is the example for the richer flag kinds nova gained in 0.2.0, one root
+// command carrying a float, two string slices and a choice, a count flag that is
+// persistent so it can be spelled on either side of a subcommand, and one child
+// that reads nothing but that count. Build it from this directory with
+// dusk build flags.dusk, and note that the nova entry beside this file is a
+// symlink to the library at the repository root, which is how the
+// @import nova.command line below resolves.
+@paradigm procedural
+
+// The nova library: the command tree, the run context, flags, argument rules
+// and the executor
+@import nova.command
+@import nova.context
+@import nova.flagset
+@import nova.args
+@import nova.exec
+
+// str_join and the Vector the string slice getters hand back
+@import std.string
+@import std.vector
+
+/**
+ * showList
+ * Prints one labelled list, its items joined with commas inside brackets the way the help default suffix prints them
+ * @param label {string} - the name the list is printed under
+ * @param v {*Vector<string>} - the items, borrowed from the flag
+ * @return void
+ **/
+func showList(label: string, v: *Vector<string>) -> void {
+    // The items joined with commas
+    joined: string = str_join(v, ",")
+
+    // The label and the list
+    println("{}=[{}]", label, joined)
+
+    // Free the joined copy
+    free(joined)
+}
+
+/**
+ * runFlags
+ * Prints one line per flag, so every case can read back what the parser stored
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runFlags(ctx: *Context) -> int32 {
+    // The float flag
+    rate: float64 = ctx.getFloat("rate")
+
+    // The line the float is rendered into, dusk's own float formatting
+    line: string = f"rate={rate}"
+
+    // Print it and free the built line
+    println(line)
+    free(line)
+
+    // The two string slice flags, borrowed from their flags
+    showList("tags", ctx.getStrs("tag"))
+    showList("exclude", ctx.getStrs("exclude"))
+
+    // The choice flag, read back with getStr like any other string
+    println("emit={}", ctx.getStr("emit"))
+
+    // The count flag, inherited from the root's persistent set
+    println("verbose={}", ctx.getCount("verbose"))
+
+    // Nothing here can fail so the exit code is always 0
+    return 0
+}
+
+/**
+ * runEcho
+ * Prints the count the root declared, which reaches this command through the chain
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runEcho(ctx: *Context) -> int32 {
+    // The count as the child sees it
+    println("echo verbose={}", ctx.getCount("verbose"))
+
+    // Nothing here can fail so the exit code is always 0
+    return 0
+}
+
+/**
+ * echoCmd
+ * Builds the child command, which declares no flags of its own
+ * @return *Command - the child, ready to be added to the root
+ **/
+func echoCmd() -> *Command {
+    // The child command, name and one line description
+    c: *Command = cmdNew("echo", "Print the inherited count")
+
+    // No positional arguments are expected
+    c.setArgs(argsNone())
+
+    // The handler
+    c.setRun(runEcho)
+
+    // Hand the finished command back to the caller
+    return c
+}
+
+/**
+ * flagsCmd
+ * Builds the root command with one flag of every kind 0.2.0 added
+ * @return *Command - the root command, ready for novaExecute
+ **/
+func flagsCmd() -> *Command {
+    // The root command, name and one line description
+    c: *Command = cmdNew("flags", "Show every flag kind nova knows")
+
+    // The long description shown by flags --help
+    c.setLong("flags declares one flag of every kind and prints what the parser made of them.\n\nThe count flag is persistent, so -v, -vvv and --verbose=3 work on either side\nof the subcommand.")
+
+    // No positional arguments are expected
+    c.setArgs(argsNone())
+
+    // The handler, a named top level function because a lambda that captured a
+    // local could not outlive the frame that built the command tree
+    c.setRun(runFlags)
+
+    // A float, parsed with parse_float
+    c.localFlags().addFloat("rate", "r", 1.5, "rate to apply")
+
+    // A string slice with a default, where the first spelling on the line replaces it
+    c.localFlags().addStrs("tag", "t", "a,b", "tags to attach")
+
+    // A string slice that starts out empty
+    c.localFlags().addStrs("exclude", "x", "", "names to skip")
+
+    // A choice, a string flag whose value must be one of its alternatives
+    c.localFlags().addChoice("emit", "e", "llvm", "llvm,obj", "what to emit")
+
+    // A count, persistent so the child inherits it
+    c.persistentFlags().addCount("verbose", "v", "verbosity, repeatable")
+
+    // The one child, which reads the inherited count
+    c.addCommand(echoCmd())
+
+    // Hand the finished command back to the caller
+    return c
+}
+
+/**
+ * main
+ * Builds the command tree and hands the command line to nova
+ * @param argc {int32} - the argument count, unused here
+ * @param argv {string[]} - the raw command line, program name first
+ * @return int32 - the exit code novaExecute produced
+ **/
+func main(argc: int32, argv: string[]) -> int32 {
+    // The command tree, one command deep
+    root: *Command = flagsCmd()
+
+    // Parse argv against the tree, run the handler and return its exit code
+    return novaExecute(root, argv)
+}

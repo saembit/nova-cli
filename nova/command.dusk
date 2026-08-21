@@ -1,6 +1,6 @@
 /**
  * nova/command.dusk
- * The Command tree, a Command carries its use line, help text, local and persistent flags, children, hooks and the positional arg validator, novaExecute walks the tree argv describes and dispatches to the handlers
+ * The Command tree, a Command carries its use line, help text, local and persistent flags, children, hooks, flag groups, its out and err sinks and the positional arg validator, novaExecute walks the tree argv describes and dispatches to the handlers
  * Commands are heap values built by cmdNew and linked with addCommand, the tree lives until novaFreeTree in freetree.dusk frees it, usually at the end of main, a duplicate child name aborts with "fatal: nova: ..." on stderr
  **/
 @paradigm oop
@@ -9,13 +9,15 @@
 @import std.string
 @import std.vector
 @import flagset
+@import flaggroup
 @import args
 @import text
+@import sink
 @import context
 
 /**
  * Command
- * One node of the CLI tree, every string is borrowed from a caller literal or argv, a command with no handler holds cmdNoop and the matching has flag is false
+ * One node of the CLI tree, every string is borrowed from a caller literal or argv, a command with no handler holds cmdNoop and the matching has flag is false, the E hooks and the help and usage funcs are held the same way and the two sinks start as Inherit so a command writes wherever its parent does
  **/
 export struct Command {
     use: string,
@@ -33,6 +35,7 @@ export struct Command {
     path: string,
     args: ArgSpec,
     validArgs: *Vector<string>,
+    groups: *Vector<*FlagGroup>,
     hasRun: bool,
     run: (*Context) -> int32,
     hasPre: bool,
@@ -43,6 +46,23 @@ export struct Command {
     persistentPreRun: (*Context) -> int32,
     hasPpost: bool,
     persistentPostRun: (*Context) -> int32,
+    hasRunE: bool,
+    runE: (*Context) -> error,
+    hasPreE: bool,
+    preRunE: (*Context) -> error,
+    hasPostE: bool,
+    postRunE: (*Context) -> error,
+    hasPpreE: bool,
+    persistentPreRunE: (*Context) -> error,
+    hasPpostE: bool,
+    persistentPostRunE: (*Context) -> error,
+    out: Sink,
+    err: Sink,
+    hasHelpFunc: bool,
+    helpFunc: (*Context) -> void,
+    hasUsageFunc: bool,
+    usageFunc: (*Context) -> void,
+    wrapWidth: int64,
     silenceUsage: bool,
     silenceErrors: bool,
     disableHelpCmd: bool,
@@ -60,6 +80,28 @@ export struct Command {
 export func cmdNoop(ctx: *Context) -> int32 {
     // Return success
     return 0
+}
+
+/**
+ * cmdNoopE
+ * The placeholder handler every unset E hook field holds
+ * @param ctx {*Context} - ignored
+ * @return a clean error
+ **/
+export func cmdNoopE(ctx: *Context) -> error {
+    // Return success
+    return error {}
+}
+
+/**
+ * cmdNoopPrint
+ * The placeholder every unset help and usage func field holds, the resolved default is used instead of it
+ * @param ctx {*Context} - ignored
+ * @return nothing
+ **/
+export func cmdNoopPrint(ctx: *Context) -> void {
+    // Print nothing
+    return
 }
 
 /**
@@ -89,10 +131,11 @@ export func cmdNameOf(use: string) -> string {
  * @return a pointer to the new command
  **/
 export func cmdNew(use: string, short: string) -> *Command {
-    // The empty alias, child and valid arg vectors
+    // The empty alias, child, valid arg and flag group vectors
     aliases: *Vector<string> = alloc(vec_new())
     kids: *Vector<*Command> = alloc(vec_new())
     valid: *Vector<string> = alloc(vec_new())
+    groups: *Vector<*FlagGroup> = alloc(vec_new())
 
     // The name from the use line
     name: string = cmdNameOf(use)
@@ -102,12 +145,21 @@ export func cmdNew(use: string, short: string) -> *Command {
         use: use, name: name, short: short, long: "", example: "", version: "",
         aliases: aliases, hidden: false, deprecated: "",
         flags: flagsetNew(), pflags: flagsetNew(), kids: kids,
-        path: name, args: argsAny(), validArgs: valid,
+        path: name, args: argsAny(), validArgs: valid, groups: groups,
         hasRun: false, run: cmdNoop,
         hasPre: false, preRun: cmdNoop,
         hasPost: false, postRun: cmdNoop,
         hasPpre: false, persistentPreRun: cmdNoop,
         hasPpost: false, persistentPostRun: cmdNoop,
+        hasRunE: false, runE: cmdNoopE,
+        hasPreE: false, preRunE: cmdNoopE,
+        hasPostE: false, postRunE: cmdNoopE,
+        hasPpreE: false, persistentPreRunE: cmdNoopE,
+        hasPpostE: false, persistentPostRunE: cmdNoopE,
+        out: Sink.Inherit, err: Sink.Inherit,
+        hasHelpFunc: false, helpFunc: cmdNoopPrint,
+        hasUsageFunc: false, usageFunc: cmdNoopPrint,
+        wrapWidth: 0,
         silenceUsage: false, silenceErrors: false,
         disableHelpCmd: false, disableCompletionCmd: false,
         disableFlagParsing: false, isBuiltin: false,
@@ -187,6 +239,84 @@ export func cmdMatches(c: *Command, word: string) -> bool {
 
     // No match
     return false
+}
+
+/**
+ * cmdIsRunnable
+ * Checks if the command has a handler of either form, the int32 one or the error one
+ * @param c {*Command} - the command
+ * @return true when one of them is set
+ **/
+export func cmdIsRunnable(c: *Command) -> bool {
+    // Either form makes the command runnable
+    return (*c).hasRun || (*c).hasRunE
+}
+
+/**
+ * cmdNearestHelpFunc
+ * Finds the chain entry whose help func the leaf uses, the nearest one from the leaf up
+ * @param chain {*Vector<*Command>} - the commands root..leaf, borrowed
+ * @return the index of the entry, or -1 when none of them sets one
+ **/
+export func cmdNearestHelpFunc(chain: *Vector<*Command>) -> int64 {
+    // Walk the chain from the leaf up to the root
+    mut i: int64 = vec_len(chain) - 1
+    while i >= 0 {
+        // Return the first entry that carries one
+        c: *Command = vec_get(chain, i)
+        if (*c).hasHelpFunc {
+            return i
+        }
+        i = i - 1
+    }
+
+    // Nothing on the chain carries one
+    return -1
+}
+
+/**
+ * cmdNearestUsageFunc
+ * Finds the chain entry whose usage func the leaf uses, the nearest one from the leaf up
+ * @param chain {*Vector<*Command>} - the commands root..leaf, borrowed
+ * @return the index of the entry, or -1 when none of them sets one
+ **/
+export func cmdNearestUsageFunc(chain: *Vector<*Command>) -> int64 {
+    // Walk the chain from the leaf up to the root
+    mut i: int64 = vec_len(chain) - 1
+    while i >= 0 {
+        // Return the first entry that carries one
+        c: *Command = vec_get(chain, i)
+        if (*c).hasUsageFunc {
+            return i
+        }
+        i = i - 1
+    }
+
+    // Nothing on the chain carries one
+    return -1
+}
+
+/**
+ * cmdResolveWrapWidth
+ * Gives the column help is wrapped at for a chain, the nearest non zero width from the leaf up
+ * @param chain {*Vector<*Command>} - the commands root..leaf, borrowed
+ * @return the column, or 0 when nothing on the chain sets one and wrapping is off
+ **/
+export func cmdResolveWrapWidth(chain: *Vector<*Command>) -> int64 {
+    // Walk the chain from the leaf up to the root
+    mut i: int64 = vec_len(chain) - 1
+    while i >= 0 {
+        // Return the first width that is set
+        c: *Command = vec_get(chain, i)
+        w: int64 = (*c).wrapWidth
+        if w > 0 {
+            return w
+        }
+        i = i - 1
+    }
+
+    // Nothing on the chain sets one
+    return 0
 }
 
 impl Command {
@@ -294,6 +424,9 @@ impl Command {
         // Store the handler and mark it set
         self.run = f
         self.hasRun = true
+
+        // Drop the E form, nova keeps one of the two
+        self.hasRunE = false
     }
 
     /**
@@ -306,6 +439,9 @@ impl Command {
         // Store the hook and mark it set
         self.preRun = f
         self.hasPre = true
+
+        // Drop the E form, nova keeps one of the two
+        self.hasPreE = false
     }
 
     /**
@@ -318,6 +454,9 @@ impl Command {
         // Store the hook and mark it set
         self.postRun = f
         self.hasPost = true
+
+        // Drop the E form, nova keeps one of the two
+        self.hasPostE = false
     }
 
     /**
@@ -330,6 +469,9 @@ impl Command {
         // Store the hook and mark it set
         self.persistentPreRun = f
         self.hasPpre = true
+
+        // Drop the E form, nova keeps one of the two
+        self.hasPpreE = false
     }
 
     /**
@@ -342,6 +484,141 @@ impl Command {
         // Store the hook and mark it set
         self.persistentPostRun = f
         self.hasPpost = true
+
+        // Drop the E form, nova keeps one of the two
+        self.hasPpostE = false
+    }
+
+    /**
+     * setRunE
+     * Sets the handler that returns an error and makes the command runnable, an error it hands back ends the chain with exit code 1
+     * @param f {(*Context) -> error} - the handler
+     * @return nothing
+     **/
+    func setRunE(f: (*Context) -> error) -> void {
+        // Store the handler and mark it set
+        self.runE = f
+        self.hasRunE = true
+
+        // Drop the int32 form, nova keeps one of the two
+        self.hasRun = false
+    }
+
+    /**
+     * setPreRunE
+     * Sets the hook that runs just before run and may hand back an error
+     * @param f {(*Context) -> error} - the hook
+     * @return nothing
+     **/
+    func setPreRunE(f: (*Context) -> error) -> void {
+        // Store the hook and mark it set
+        self.preRunE = f
+        self.hasPreE = true
+
+        // Drop the int32 form, nova keeps one of the two
+        self.hasPre = false
+    }
+
+    /**
+     * setPostRunE
+     * Sets the hook that runs just after run and may hand back an error
+     * @param f {(*Context) -> error} - the hook
+     * @return nothing
+     **/
+    func setPostRunE(f: (*Context) -> error) -> void {
+        // Store the hook and mark it set
+        self.postRunE = f
+        self.hasPostE = true
+
+        // Drop the int32 form, nova keeps one of the two
+        self.hasPost = false
+    }
+
+    /**
+     * setPersistentPreRunE
+     * Sets the inherited hook that runs before preRun and may hand back an error
+     * @param f {(*Context) -> error} - the hook
+     * @return nothing
+     **/
+    func setPersistentPreRunE(f: (*Context) -> error) -> void {
+        // Store the hook and mark it set
+        self.persistentPreRunE = f
+        self.hasPpreE = true
+
+        // Drop the int32 form, nova keeps one of the two
+        self.hasPpre = false
+    }
+
+    /**
+     * setPersistentPostRunE
+     * Sets the inherited hook that runs after postRun and may hand back an error
+     * @param f {(*Context) -> error} - the hook
+     * @return nothing
+     **/
+    func setPersistentPostRunE(f: (*Context) -> error) -> void {
+        // Store the hook and mark it set
+        self.persistentPostRunE = f
+        self.hasPpostE = true
+
+        // Drop the int32 form, nova keeps one of the two
+        self.hasPpost = false
+    }
+
+    /**
+     * setOut
+     * Sets where the command and its descendants write help, the version line and completion scripts
+     * @param s {Sink} - the destination, Sink.Inherit to take the parent's
+     * @return nothing
+     **/
+    func setOut(s: Sink) -> void {
+        // Store the sink
+        self.out = s
+    }
+
+    /**
+     * setErr
+     * Sets where the command and its descendants write errors, usage hints and deprecation warnings
+     * @param s {Sink} - the destination, Sink.Inherit to take the parent's
+     * @return nothing
+     **/
+    func setErr(s: Sink) -> void {
+        // Store the sink
+        self.err = s
+    }
+
+    /**
+     * setHelpFunc
+     * Sets the function that prints help for this command and its descendants, in place of the default renderer
+     * @param f {(*Context) -> void} - the printer, it gets a context naming the command help was asked for
+     * @return nothing
+     **/
+    func setHelpFunc(f: (*Context) -> void) -> void {
+        // Store the function and mark it set
+        self.helpFunc = f
+        self.hasHelpFunc = true
+    }
+
+    /**
+     * setUsageFunc
+     * Sets the function that prints the usage block for this command and its descendants, in place of the default renderer
+     * @param f {(*Context) -> void} - the printer, it gets a context naming the command usage was asked for
+     * @return nothing
+     **/
+    func setUsageFunc(f: (*Context) -> void) -> void {
+        // Store the function and mark it set
+        self.usageFunc = f
+        self.hasUsageFunc = true
+    }
+
+    /**
+     * setWrapWidth
+     * Sets the column help text is wrapped at for this command and its descendants, 0 turning wrapping off
+     * @param n {int64} - the column
+     * @return nothing
+     **/
+    func setWrapWidth(n: int64) -> void {
+        // Store the column
+        self.wrapWidth = n
     }
 
     /**
@@ -417,6 +694,77 @@ impl Command {
     func persistentFlags() -> *FlagSet {
         // Return the persistent set
         return self.pflags
+    }
+
+    /**
+     * addFlagGroup
+     * Adds a flag group of one rule, every name must be declared on this command's local or persistent set
+     * @param kind {GroupKind} - the rule the group carries
+     * @param names {string} - the long names without dashes, comma separated
+     * @return nothing
+     **/
+    func addFlagGroup(kind: GroupKind, names: string) -> void {
+        // The group with its names split off the list
+        g: *FlagGroup = flagGroupNew(kind, names)
+
+        // The names it lists
+        gnames: *Vector<string> = (*g).names
+
+        // The two sets a name may be declared in
+        lf: *FlagSet = self.flags
+        pf: *FlagSet = self.pflags
+
+        // Loop over the names in declaration order
+        mut i: int64 = 0
+        while i < vec_len(gnames) {
+            // The current name
+            n: string = vec_get(gnames, i)
+
+            // A name neither set declares is a fault
+            if !lf.has(n) && !pf.has(n) {
+                novaFault("no flag named '--", n, "' for the flag group")
+            }
+            i = i + 1
+        }
+
+        // The group vector
+        groups: *Vector<*FlagGroup> = self.groups
+
+        // Push the group
+        vec_push(groups, g)
+    }
+
+    /**
+     * markFlagsRequiredTogether
+     * Declares that the listed flags are set together or not at all
+     * @param names {string} - the long names without dashes, comma separated
+     * @return nothing
+     **/
+    func markFlagsRequiredTogether(names: string) -> void {
+        // Add the group under the together rule
+        self.addFlagGroup(GroupKind.GTogether, names)
+    }
+
+    /**
+     * markFlagsOneRequired
+     * Declares that at least one of the listed flags is set
+     * @param names {string} - the long names without dashes, comma separated
+     * @return nothing
+     **/
+    func markFlagsOneRequired(names: string) -> void {
+        // Add the group under the one required rule
+        self.addFlagGroup(GroupKind.GOneRequired, names)
+    }
+
+    /**
+     * markFlagsMutuallyExclusive
+     * Declares that no two of the listed flags are set on the same line
+     * @param names {string} - the long names without dashes, comma separated
+     * @return nothing
+     **/
+    func markFlagsMutuallyExclusive(names: string) -> void {
+        // Add the group under the exclusive rule
+        self.addFlagGroup(GroupKind.GExclusive, names)
     }
 
     /**
@@ -537,7 +885,7 @@ impl Command {
      * @return true when set
      **/
     func isRunnable() -> bool {
-        // Return the has run bit
-        return self.hasRun
+        // Return whether either form of the handler is set
+        return self.hasRun || self.hasRunE
     }
 }

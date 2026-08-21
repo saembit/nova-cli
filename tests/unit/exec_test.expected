@@ -342,7 +342,94 @@ Flags:
 Use "app3 [command] --help" for more information about a command.
 == app3 --help -> 0
 
+## flag groups
+login: user=ann pass=x
+== app4 login --user ann --pass x -> 0
+
+Error: if any flags in the group [user pass] are set they must all be set; missing [pass]
+Run 'app4 login --help' for usage.
+== app4 login -u ann -> 1
+
+login: user= pass=
+== app4 login -> 0
+
+Error: at least one of the flags in the group [json yaml] is required
+Run 'app4 emit --help' for usage.
+== app4 emit -> 1
+
+emit: json=true yaml=false
+== app4 emit --json -> 0
+
+Error: if any flags in the group [json yaml] are set none of the others can be; [json yaml] were all set
+Run 'app4 emit --help' for usage.
+== app4 emit --json --yaml -> 1
+
+Error: required flag(s) "need" not set
+Run 'app4 order --help' for usage.
+== app4 order -u ann -> 1
+
+Error: if any flags in the group [user pass] are set they must all be set; missing [pass]
+Run 'app4 order --help' for usage.
+== app4 order --need x -u ann extra -> 1
+
+Error: if any flags in the group [remote force] are set they must all be set; missing [force]
+Run 'app4 push --help' for usage.
+== app4 push -r origin -> 1
+
+push: remote=origin force=true
+== app4 push -r origin -f -> 0
+
+tags: remote=origin limit=2
+== app4 push tags -r origin --limit 2 -> 0
+
 ## ctxLookup
 lookup port: found=true index=0 len=4
 lookup verbose: found=true index=0 len=2
 lookup help: found=false index=-1 len=4
+## buffered sinks and novaExecuteE
+-- out (23 bytes)
+echo: this went to out
+-- err (23 bytes)
+echo: this went to err
+== app5 echo -> 0
+   error: none
+
+-- out (339 bytes)
+Buffered sinks
+
+Usage:
+  app5 [command]
+
+Available Commands:
+  completion  Generate the autocompletion script for the specified shell
+  deny        Refuse one word
+  echo        Write to both sinks
+  help        Help about any command
+
+Flags:
+  -h, --help   help for app5
+
+Use "app5 [command] --help" for more information about a command.
+-- err (0 bytes)
+== app5 --help -> 0
+   error: none
+
+-- out (0 bytes)
+-- err (55 bytes)
+Error: refusing "no"
+Run 'app5 deny --help' for usage.
+== app5 deny no -> 1
+   error: refusing "no"
+
+-- out (18 bytes)
+deny: allowed yes
+-- err (0 bytes)
+== app5 deny yes -> 0
+   error: none
+
+-- out (0 bytes)
+-- err (71 bytes)
+Error: unknown command "bogus" for "app5"
+Run 'app5 --help' for usage.
+== app5 bogus -> 1
+   error: unknown command "bogus" for "app5"

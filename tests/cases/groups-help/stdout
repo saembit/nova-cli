@@ -1,0 +1,20 @@
+groups shows the three flag group rules.
+
+login needs its two flags together, emit needs exactly one of its two,
+and push ties a local flag to a persistent one.
+
+Usage:
+  groups [command]
+
+Available Commands:
+  completion  Generate the autocompletion script for the specified shell
+  emit        Write the report in one format
+  help        Help about any command
+  login       Log in with a user and a password
+  push        Push the work to a remote
+
+Flags:
+  -h, --help      help for groups
+      --version   version for groups
+
+Use "groups [command] --help" for more information about a command.

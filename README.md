@@ -10,7 +10,9 @@ A Cobra style command line framework for dusk
 - [Install](#install)
 - [Quick start](#quick-start)
 - [Commands and flags](#commands-and-flags)
+- [Flag groups](#flag-groups)
 - [Help output](#help-output)
+- [Output and errors](#output-and-errors)
 - [Generator](#generator)
 - [Shell completion](#shell-completion)
 - [Tests](#tests)
@@ -27,7 +29,7 @@ nova needs dusk 1.14 or newer, since that's where the package manifest landed. I
 ```console
 $ mkdir myapp && cd myapp
 $ dawn init myapp
-$ dawn add nova github.com/saembit/nova-cli v0.1.1
+$ dawn add nova github.com/saembit/nova-cli v0.2.0
 ```
 
 dawn add fetches the package into dawn_modules/nova, records the commit in dawn.lock, and writes the @require line into package.dawn, and after that every file in the project just writes @import nova.command and builds offline, cmd/serve_cmd.dusk included, since alias resolution is manifest wide and the compiler never touches the network. For the generator itself, clone this repository and build the binary, which lands in target/dusk-out/nova-cli.
@@ -106,20 +108,24 @@ c.setSilenceUsage(true)
 c.addCommand(child)
 ```
 
-Handlers have to be named top level functions or capture free lambdas, since a lambda that captured a local couldn't escape the frame that built the tree. Flags come in three kinds and live either on the command or on all of its descendants.
+Handlers have to be named top level functions or capture free lambdas, since a lambda that captured a local couldn't escape the frame that built the tree. Flags come in seven kinds and live either on the command or on all of its descendants.
 
 ```dusk
 c.localFlags().addStr("name", "n", "world", "who to greet")
 c.localFlags().addBool("shout", "s", false, "shout the greeting")
 c.localFlags().addInt("times", "t", 1, "how many times to greet")
+c.localFlags().addFloat("rate", "r", 1.5, "rate to apply")
+c.localFlags().addStrs("tag", "g", "a,b", "tags to attach")          // default is comma separated, "" for none
+c.localFlags().addChoice("emit", "e", "llvm", "llvm,obj", "what to emit")
 c.localFlags().markRequired("name")
 c.localFlags().markHidden("internal")
 c.localFlags().markDeprecated("old", "use --new")
 
 c.persistentFlags().addBool("verbose", "v", false, "verbose output")
+c.persistentFlags().addCount("loud", "l", "loudness, repeatable")
 ```
 
-Persistent flags are inherited by every descendant and can be given on either side of the subcommand, so todo -v list and todo list -v are the same, and the parser accepts --name value, --name=value, -n value, -nvalue, grouped bool shorthands where -st 3 is -s -t 3, and -- to end flag parsing. Inside a handler the Context is the only thing you need.
+Persistent flags are inherited by every descendant and can be given on either side of the subcommand, so todo -v list and todo list -v are the same, and the parser accepts --name value, --name=value, -n value, -nvalue, grouped bool shorthands where -st 3 is -s -t 3, and -- to end flag parsing. A strs flag splits every value on commas with no quoting and appends across repeats, so --tag a --tag b,c is a, b, c and the first value on the line replaces the default, a count flag takes no value and adds one per occurrence, so -lll is 3 and --loud=5 sets it outright, a float parses whatever parse_float takes, and a choice flag refuses anything outside its list with invalid argument "x" for "--emit" flag: must be one of "llvm", "obj". Inside a handler the Context is the only thing you need.
 
 ```dusk
 func runServe(ctx: *Context) -> int32 {
@@ -127,7 +133,10 @@ func runServe(ctx: *Context) -> int32 {
     first: string = ctx.arg(0)
     port: int64 = ctx.getInt("port")     // searches local, then inherited
     loud: bool = ctx.getBool("verbose")
-    who: string = ctx.getStr("name")
+    who: string = ctx.getStr("name")     // a choice flag reads through getStr too
+    rate: float64 = ctx.getFloat("rate")
+    tags: *Vector<string> = ctx.getStrs("tag")   // borrowed, don't free it
+    level: int64 = ctx.getCount("loud")
     if ctx.changed("port") { ... }
     if n == 0 {
         return ctx.fail("nothing to serve")  // Error line plus usage hint, returns 1
@@ -153,6 +162,24 @@ Error: unknown flag: --bogus
 Run 'hello --help' for usage.
 ```
 
+# Flag groups
+
+A command can tie some of its flags together the way Cobra does, each mark takes a comma separated list of names that have to be declared on that command already, local or persistent, and the rules are checked after the required flags and before the positional arguments.
+
+```dusk
+c.markFlagsRequiredTogether("user,pass")
+c.markFlagsOneRequired("json,yaml")
+c.markFlagsMutuallyExclusive("json,yaml")
+```
+
+A flag counts as set when it was given on the line, the messages are Cobra's own, and a group belongs to the command that declared it, so a child that inherits the flags doesn't inherit the rule.
+
+```console
+$ groups login --user ann
+Error: if any flags in the group [user pass] are set they must all be set; missing [pass]
+Run 'groups login --help' for usage.
+```
+
 # Help output
 
 ```console
@@ -170,6 +197,45 @@ Flags:
   -n, --name string   who to greet (default "world")
   -s, --shout         shout the greeting
   -t, --times int     how many times to greet (default 1)
+```
+
+The type word after a flag is string, int, float or strings, nothing for a bool or a count, and the choices joined with | for a choice flag, and the default shows when it isn't the zero value, so (default 1.5) or (default [a,b]). Nothing is wrapped unless you ask, c.setWrapWidth(60) on the root or on one command wraps its descriptions and flag help at that column with the continuation lines indented under the description column.
+
+# Output and errors
+
+Everything nova prints goes through two sinks, out for help, the version line and completion scripts, err for error lines, usage hints and deprecation warnings, and both default to stdout and stderr. A command can point either one somewhere else and every descendant follows it, which is how the sinks example catches its own output in a test.
+
+```dusk
+@import nova.sink
+
+outbuf: *StringBuilder = alloc(sb_new())
+root.setOut(Sink.Buffer(outbuf))     // Sink.Stdout, Sink.Stderr, Sink.Fd(2), Sink.Func(myWriter), Sink.Buffer(sb)
+root.setErr(Sink.Stderr)
+```
+
+Inside a handler ctx.print, ctx.println, ctx.eprint and ctx.eprintln write to the same sinks, and ctx.printHelp and ctx.printUsage go through whatever help and usage functions are set, c.setHelpFunc(f) and c.setUsageFunc(f) taking a (*Context) -> void that replaces the Cobra layout for that command and its descendants.
+
+A handler can return an error instead of an exit code. Every hook has an E twin, setRunE, setPreRunE, setPostRunE, setPersistentPreRunE and setPersistentPostRunE, each taking a (*Context) -> error, setting one clears the int32 form of the same hook, and an error coming back ends the chain, prints Error: <msg> and the usage hint under the usual silence flags and exits 1.
+
+```dusk
+func runCheck(ctx: *Context) -> error {
+    if ctx.arg(0) == "bad" {
+        return error { message: "cannot check \"bad\"" }
+    }
+    return error {}
+}
+
+c.setRunE(runCheck)
+```
+
+novaExecuteE hands the error back along with the code, already reported, so main can decide what to do with it, and novaExecute is the same call with the error dropped.
+
+```dusk
+code, e := novaExecuteE(rootCmd(), argv)
+if e.exists() {
+    // the flag, argument, group or handler error, already printed per the silence flags
+}
+return code
 ```
 
 # Generator
@@ -221,6 +287,6 @@ $ tests/gen.sh --no-build --keep  # reuse the binary, leave the sandbox behind
 
 # Status
 
-There's a fair amount that isn't done. The command tree lives for the whole process and novaFreeTree in nova/freetree.dusk frees it at the end of main if you want it gone, it frees every command, their vectors and both flag sets but not the strings since those are your literals or argv, the library needs dusk 1.14 or newer since it leans on the package manifest as well as @paradigm oop plus procedural, self referencing vectors, function typed struct fields, etc. and dawn has no version ranges, so a reference is one tag, branch or commit and a diamond in the dependency graph is something you pin yourself. init --vendor and init --link still write the pre 1.14 shape for a tree that has to build with no dawn at all, they find the library through NOVA_HOME or by walking up from the running binary. The examples in this repository are the odd ones out, they use symlinks to reach nova because they sit inside the nova-cli package itself and a package can't require itself. Completion is static and covers bash and zsh only, error messages follow Cobra 1.x but print the help hint instead of a full usage dump, and library misuse such as a duplicate flag, a duplicate command name, a getter for a flag that doesn't exist, etc. aborts with fatal: nova: <msg> on stderr rather than handing you an error to deal with.
+There's a fair amount that isn't done. The command tree lives for the whole process and novaFreeTree in nova/freetree.dusk frees it at the end of main if you want it gone, it frees every command, their vectors, groups and both flag sets along with the strings a strs or choice flag split for itself, but not the strings you handed in since those are your literals or argv, the library needs dusk 1.14 or newer since it leans on the package manifest as well as @paradigm oop plus procedural, self referencing vectors, function typed struct fields, etc. and dawn has no version ranges, so a reference is one tag, branch or commit and a diamond in the dependency graph is something you pin yourself. init --vendor and init --link still write the pre 1.14 shape for a tree that has to build with no dawn at all, they find the library through NOVA_HOME or by walking up from the running binary. The examples in this repository are the odd ones out, they use symlinks to reach nova because they sit inside the nova-cli package itself and a package can't require itself. Completion is static and covers bash and zsh only, it never completes a flag's value, not even a choice flag's list, error messages follow Cobra 1.x but print the help hint instead of a full usage dump, and library misuse such as a duplicate flag, a duplicate command name, a getter for a flag that doesn't exist, etc. aborts with fatal: nova: <msg> on stderr rather than handing you an error to deal with.
 
 It may not be perfect but it's better than nothing.

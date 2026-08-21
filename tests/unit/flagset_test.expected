@@ -26,6 +26,38 @@ changed after reset: false false false
 setBoolOn verbose=true changed=true
 marks required=true hidden=true deprecated=[use --listen instead]
 unmarked required=false hidden=false deprecated=[]
+== rich kinds ==
+len 5
+kind words: float=[float] strs=[strings] count=[] choice=[]
+type words: rate=[float] tag=[strings] verbose=[] emit=[llvm|obj]
+takes value: rate=true tag=true verbose=false emit=true
+defaults rate=1.5
+defaults tag [a,b]
+defaults exclude []
+defaults verbose=0 emit=llvm
+changed before: false false false false
+set float: ok
+rate=2.5
+set float bad: err: invalid argument "abc" for "--rate" flag: expected a number
+rate after bad=2.5
+set strs first: ok
+tag [x]
+set strs again: ok
+tag [x,y,z]
+verbose=2 changed=true
+set count: ok
+verbose=7
+set count bad: err: invalid argument "x" for "--verbose" flag: expected an integer
+verbose after bad=7
+set choice: ok
+emit=obj
+set choice bad: err: invalid argument "wasm" for "--emit" flag: must be one of "llvm", "obj"
+emit after bad=obj
+after reset rate=1.5
+after reset tag [a,b]
+after reset verbose=0 emit=llvm
+changed after reset: false false false false
+freed ok
 == bool parse ==
 parse_bool true -> true
 parse_bool True -> true

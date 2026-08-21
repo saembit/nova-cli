@@ -19,6 +19,7 @@
 @import nova.flagset
 @import nova.args
 @import nova.text
+@import nova.sink
 @import nova.exec
 
 /**
@@ -388,6 +389,135 @@ func buildRoot3() -> *Command {
 }
 
 /**
+ * loginRun
+ * Prints the two credential flags the required together group let through
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func loginRun(ctx: *Context) -> int32 {
+    // Both flags are set or neither is
+    println("login: user={} pass={}", ctx.getStr("user"), ctx.getStr("pass"))
+
+    // Logging in cannot fail here
+    return 0
+}
+
+/**
+ * emitRun
+ * Prints the one format the one required and exclusive groups allow
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func emitRun(ctx: *Context) -> int32 {
+    // Exactly one of the two is set
+    println("emit: json={} yaml={}", textBool(ctx.getBool("json")), textBool(ctx.getBool("yaml")))
+
+    // Emitting cannot fail here
+    return 0
+}
+
+/**
+ * orderRun
+ * Prints the flags of the command that carries a required flag and a group at once
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func orderRun(ctx: *Context) -> int32 {
+    // The required flag and the two the group ties together
+    println("order: need={} user={} pass={}", ctx.getStr("need"), ctx.getStr("user"), ctx.getStr("pass"))
+
+    // Nothing here can fail
+    return 0
+}
+
+/**
+ * pushRun
+ * Prints the persistent remote and the local force flag one group ties together
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func pushRun(ctx: *Context) -> int32 {
+    // The remote is resolved along the chain, force out of the leaf's own set
+    println("push: remote={} force={}", ctx.getStr("remote"), textBool(ctx.getBool("force")))
+
+    // Pushing cannot fail here
+    return 0
+}
+
+/**
+ * tagsRun
+ * Prints the remote the child inherited from push, which push's group does not reach
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func tagsRun(ctx: *Context) -> int32 {
+    // The inherited remote and the child's own flag
+    println("tags: remote={} limit={}", ctx.getStr("remote"), ctx.getInt("limit"))
+
+    // Pushing tags cannot fail here
+    return 0
+}
+
+/**
+ * buildRoot4
+ * Builds the tree the flag group cases are driven against, one command per rule plus one carrying a required flag beside a group
+ * @return *Command - the root of the group tree
+ **/
+func buildRoot4() -> *Command {
+    // The root command, name and one line description
+    root: *Command = cmdNew("app4", "Flag groups")
+
+    // login ties its two credential flags together
+    login: *Command = cmdNew("login", "Log in")
+    login.setArgs(argsNone())
+    login.localFlags().addStr("user", "u", "", "the user")
+    login.localFlags().addStr("pass", "p", "", "the password")
+    login.markFlagsRequiredTogether("user,pass")
+    login.setRun(loginRun)
+    root.addCommand(login)
+
+    // emit needs one of its two formats and refuses both, in that order
+    emit: *Command = cmdNew("emit", "Write one format")
+    emit.setArgs(argsNone())
+    emit.localFlags().addBool("json", "", false, "write JSON")
+    emit.localFlags().addBool("yaml", "", false, "write YAML")
+    emit.markFlagsOneRequired("json,yaml")
+    emit.markFlagsMutuallyExclusive("json,yaml")
+    emit.setRun(emitRun)
+    root.addCommand(emit)
+
+    // order carries a required flag, a group and an arg rule, so the check order shows
+    order: *Command = cmdNew("order", "Required flag beside a group")
+    order.setArgs(argsNone())
+    order.localFlags().addStr("need", "", "", "the required flag")
+    order.localFlags().markRequired("need")
+    order.localFlags().addStr("user", "u", "", "the user")
+    order.localFlags().addStr("pass", "p", "", "the password")
+    order.markFlagsRequiredTogether("user,pass")
+    order.setRun(orderRun)
+    root.addCommand(order)
+
+    // push mixes its own persistent flag with a local one in a single group
+    push: *Command = cmdNew("push", "Push to a remote")
+    push.setArgs(argsNone())
+    push.persistentFlags().addStr("remote", "r", "", "the remote")
+    push.localFlags().addBool("force", "f", false, "overwrite it")
+    push.markFlagsRequiredTogether("remote,force")
+    push.setRun(pushRun)
+
+    // tags inherits the remote but not the group that names it
+    tags: *Command = cmdNew("tags", "Push tags")
+    tags.setArgs(argsNone())
+    tags.localFlags().addInt("limit", "", 0, "how many")
+    tags.setRun(tagsRun)
+    push.addCommand(tags)
+    root.addCommand(push)
+
+    // Hand the finished tree back to the caller
+    return root
+}
+
+/**
  * show
  * Closes one case with the command line it ran and the exit code it produced
  * @param label {string} - the command line as it would be typed
@@ -397,6 +527,116 @@ func buildRoot3() -> *Command {
 func show(label: string, code: int32) -> void {
     // The case and its exit code
     println("== {} -> {}", label, code)
+
+    // A blank line between cases
+    println("")
+}
+
+/**
+ * echoRun
+ * Writes one line to each of the context sinks, which the buffers under them catch
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func echoRun(ctx: *Context) -> int32 {
+    // The line that goes to the out sink
+    ctx.println("echo: this went to out")
+
+    // The line that goes to the err sink
+    ctx.eprintln("echo: this went to err")
+
+    // Echoing cannot fail
+    return 0
+}
+
+/**
+ * denyRun
+ * Refuses one word and hands the error back, the RunE form of a handler
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return error - the refusal for "no", clean for anything else
+ **/
+func denyRun(ctx: *Context) -> error {
+    // The word to judge
+    word: string = ctx.arg(0)
+
+    // The one word this handler refuses
+    if word == "no" {
+        return error { message: "refusing \"no\"" }
+    }
+
+    // Anything else is allowed and said so on the out sink
+    ctx.println("deny: allowed " + word)
+
+    // Nothing to report
+    return error {}
+}
+
+/**
+ * buildRoot5
+ * Builds a root whose out and err sinks are two buffers the caller owns, so nothing it prints reaches the terminal
+ * @param outbuf {*StringBuilder} - the buffer the out sink fills, borrowed
+ * @param errbuf {*StringBuilder} - the buffer the err sink fills, borrowed
+ * @return *Command - the root of the buffered tree
+ **/
+func buildRoot5(outbuf: *StringBuilder, errbuf: *StringBuilder) -> *Command {
+    // The root command, name and one line description
+    root: *Command = cmdNew("app5", "Buffered sinks")
+
+    // Help, the version line and handler output land in the first buffer
+    root.setOut(Sink.Buffer(outbuf))
+
+    // Errors, usage hints and handler complaints land in the second
+    root.setErr(Sink.Buffer(errbuf))
+
+    // echo writes one line to each sink
+    echo: *Command = cmdNew("echo", "Write to both sinks")
+    echo.setArgs(argsNone())
+    echo.setRun(echoRun)
+    root.addCommand(echo)
+
+    // deny carries the error returning handler
+    deny: *Command = cmdNew("deny <word>", "Refuse one word")
+    deny.setArgs(argsExact(1))
+    deny.setRunE(denyRun)
+    root.addCommand(deny)
+
+    // Hand the finished tree back to the caller
+    return root
+}
+
+/**
+ * showBuf
+ * Prints what one sink caught between a pair of markers
+ * @param label {string} - the name of the sink, such as "out"
+ * @param sb {*StringBuilder} - the buffer under it, borrowed
+ * @return void
+ **/
+func showBuf(label: string, sb: *StringBuilder) -> void {
+    // The marker that opens the block and the size of what was caught
+    println("-- {} ({} bytes)", label, sb_size(sb))
+
+    // The text itself, printed verbatim
+    print(sb_cstr(sb))
+}
+
+/**
+ * showE
+ * Closes one novaExecuteE case with the command line it ran, the exit code and the error it handed back
+ * @param label {string} - the command line as it would be typed
+ * @param code {int32} - the exit code novaExecuteE returned
+ * @param e {error} - the error it returned beside the code
+ * @return void
+ **/
+func showE(label: string, code: int32, e: error) -> void {
+    // The case and its exit code
+    println("== {} -> {}", label, code)
+
+    // The error beside it, already reported through the err sink
+    if e.exists() {
+        println("   error: " + e.message)
+    } else {
+        println("   error: none")
+    }
 
     // A blank line between cases
     println("")
@@ -542,6 +782,42 @@ func main(argc: int32, argv: string[]) -> int32 {
     b7: string[2] = ["app3", "--help"]
     show("app3 --help", novaExecute(root3, collector<string[]>(b7[0..b7.len])))
 
+    // The tree whose commands carry flag groups
+    println("## flag groups")
+    root4: *Command = buildRoot4()
+
+    // Required together, both set, one set and neither set
+    c1: string[6] = ["app4", "login", "--user", "ann", "--pass", "x"]
+    show("app4 login --user ann --pass x", novaExecute(root4, collector<string[]>(c1[0..c1.len])))
+    c2: string[4] = ["app4", "login", "-u", "ann"]
+    show("app4 login -u ann", novaExecute(root4, collector<string[]>(c2[0..c2.len])))
+    c3: string[2] = ["app4", "login"]
+    show("app4 login", novaExecute(root4, collector<string[]>(c3[0..c3.len])))
+
+    // One required with none set, with one set, and the exclusive group behind it with both
+    c4: string[2] = ["app4", "emit"]
+    show("app4 emit", novaExecute(root4, collector<string[]>(c4[0..c4.len])))
+    c5: string[3] = ["app4", "emit", "--json"]
+    show("app4 emit --json", novaExecute(root4, collector<string[]>(c5[0..c5.len])))
+    c6: string[4] = ["app4", "emit", "--json", "--yaml"]
+    show("app4 emit --json --yaml", novaExecute(root4, collector<string[]>(c6[0..c6.len])))
+
+    // The required flag check runs first, then the group check, then the arg rule
+    c7: string[4] = ["app4", "order", "-u", "ann"]
+    show("app4 order -u ann", novaExecute(root4, collector<string[]>(c7[0..c7.len])))
+    c8: string[7] = ["app4", "order", "--need", "x", "-u", "ann", "extra"]
+    show("app4 order --need x -u ann extra", novaExecute(root4, collector<string[]>(c8[0..c8.len])))
+
+    // A group over a local flag and the command's own persistent flag
+    c9: string[4] = ["app4", "push", "-r", "origin"]
+    show("app4 push -r origin", novaExecute(root4, collector<string[]>(c9[0..c9.len])))
+    c10: string[5] = ["app4", "push", "-r", "origin", "-f"]
+    show("app4 push -r origin -f", novaExecute(root4, collector<string[]>(c10[0..c10.len])))
+
+    // The child inherits the remote and none of push's groups
+    c11: string[7] = ["app4", "push", "tags", "-r", "origin", "--limit", "2"]
+    show("app4 push tags -r origin --limit 2", novaExecute(root4, collector<string[]>(c11[0..c11.len])))
+
     // The flag lookup a handler getter sits on, driven directly
     println("## ctxLookup")
 
@@ -567,6 +843,59 @@ func main(argc: int32, argv: string[]) -> int32 {
     // A name nothing declares, which comes back not found
     set3, i3, f3 := ctxLookup(ctx, "help")
     println("lookup help: found={} index={} len={}", textBool(f3), i3, set3.len())
+
+    // The trees whose sinks are two buffers, a fresh pair per case so each block shows only its own output
+    println("## buffered sinks and novaExecuteE")
+
+    // A handler writing one line to each sink
+    o1: *StringBuilder = alloc(sb_new())
+    r1: *StringBuilder = alloc(sb_new())
+    t1: *Command = buildRoot5(o1, r1)
+    d1: string[2] = ["app5", "echo"]
+    code1, cerr1 := novaExecuteE(t1, collector<string[]>(d1[0..d1.len]))
+    showBuf("out", o1)
+    showBuf("err", r1)
+    showE("app5 echo", code1, cerr1)
+
+    // The help of the buffered root, which goes to the out sink like everything else
+    o2: *StringBuilder = alloc(sb_new())
+    r2: *StringBuilder = alloc(sb_new())
+    t2: *Command = buildRoot5(o2, r2)
+    d2: string[2] = ["app5", "--help"]
+    code2, cerr2 := novaExecuteE(t2, collector<string[]>(d2[0..d2.len]))
+    showBuf("out", o2)
+    showBuf("err", r2)
+    showE("app5 --help", code2, cerr2)
+
+    // The RunE handler refusing its word, reported through the err sink and handed back
+    o3: *StringBuilder = alloc(sb_new())
+    r3: *StringBuilder = alloc(sb_new())
+    t3: *Command = buildRoot5(o3, r3)
+    d3: string[3] = ["app5", "deny", "no"]
+    code3, cerr3 := novaExecuteE(t3, collector<string[]>(d3[0..d3.len]))
+    showBuf("out", o3)
+    showBuf("err", r3)
+    showE("app5 deny no", code3, cerr3)
+
+    // The same handler letting a word through
+    o4: *StringBuilder = alloc(sb_new())
+    r4: *StringBuilder = alloc(sb_new())
+    t4: *Command = buildRoot5(o4, r4)
+    d4: string[3] = ["app5", "deny", "yes"]
+    code4, cerr4 := novaExecuteE(t4, collector<string[]>(d4[0..d4.len]))
+    showBuf("out", o4)
+    showBuf("err", r4)
+    showE("app5 deny yes", code4, cerr4)
+
+    // An unknown command on the buffered tree, whose report never reaches the terminal
+    o5: *StringBuilder = alloc(sb_new())
+    r5: *StringBuilder = alloc(sb_new())
+    t5: *Command = buildRoot5(o5, r5)
+    d5: string[2] = ["app5", "bogus"]
+    code5, cerr5 := novaExecuteE(t5, collector<string[]>(d5[0..d5.len]))
+    showBuf("out", o5)
+    showBuf("err", r5)
+    showE("app5 bogus", code5, cerr5)
 
     // The test harness compares output, so the exit code is always 0
     return 0

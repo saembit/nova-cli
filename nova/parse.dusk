@@ -9,6 +9,7 @@
 @import std.vector
 @import flagset
 @import text
+@import sink
 @import command
 @import context
 
@@ -88,7 +89,7 @@ export func parseCur(st: *ParseState) -> *Command {
  * Checks if a long token in pass 1 takes the next token as its value
  * @param chain {*Vector<*Command>} - the commands matched so far
  * @param tok {string} - the long flag token
- * @return true when the flag is unknown or not a bool
+ * @return true when the flag is unknown or is of a kind that wants a value
  **/
 func parseFindLongTakesValue(chain: *Vector<*Command>, tok: string) -> bool {
     // A token with "=" already carries its value
@@ -110,8 +111,8 @@ func parseFindLongTakesValue(chain: *Vector<*Command>, tok: string) -> bool {
     // The flag the name resolved to
     f: *Flag = fset.get(idx)
 
-    // Only a non bool flag takes a value
-    return !flagKindEq((*f).kind, FlagKind.KBool)
+    // Only a kind that wants a value takes one, a bool and a count swallow nothing
+    return flagTakesValue(f)
 }
 
 /**
@@ -119,7 +120,7 @@ func parseFindLongTakesValue(chain: *Vector<*Command>, tok: string) -> bool {
  * Checks if a short token in pass 1 takes the next token as its value
  * @param chain {*Vector<*Command>} - the commands matched so far
  * @param tok {string} - the short flag token
- * @return true when the token is two bytes and its shorthand is unknown or not a bool
+ * @return true when the token is two bytes and its shorthand is unknown or is of a kind that wants a value
  **/
 func parseFindShortTakesValue(chain: *Vector<*Command>, tok: string) -> bool {
     // Only a two byte token can take the next token
@@ -141,8 +142,8 @@ func parseFindShortTakesValue(chain: *Vector<*Command>, tok: string) -> bool {
     // The flag the shorthand resolved to
     f: *Flag = fset.get(idx)
 
-    // Only a non bool flag takes a value
-    return !flagKindEq((*f).kind, FlagKind.KBool)
+    // Only a kind that wants a value takes one, a bool and a count swallow nothing
+    return flagTakesValue(f)
 }
 
 /**
@@ -216,12 +217,20 @@ export func parseFind(st: *ParseState) -> void {
     }
 }
 
-// Prints the deprecation warning when the flag carries a message
-func parseWarnDeprecated(f: *Flag) -> void {
-    // Print the warning to stderr
-    if (*f).deprecated != "" {
-        printerr("Flag --" + (*f).name + " has been deprecated, " + (*f).deprecated)
+// Writes the deprecation warning to the err sink of the chain when the flag carries a message
+func parseWarnDeprecated(st: *ParseState, f: *Flag) -> void {
+    // Nothing to warn about
+    if (*f).deprecated == "" {
+        return
     }
+
+    // The warning line and the sink the run writes it to
+    line: string = "Flag --" + (*f).name + " has been deprecated, " + (*f).deprecated + "\n"
+    chain: *Vector<*Command> = (*st).chain
+
+    // Write the warning and free the line
+    sinkWrite(sinkResolveErr(chain), line)
+    free(line)
 }
 
 // Takes the next token as a flag value, false when the tokens are used up
@@ -309,7 +318,21 @@ export func parseLongFlag(st: *ParseState, tok: string) -> error {
         } else {
             fset.setBoolOn(idx)
         }
-        parseWarnDeprecated(f)
+        parseWarnDeprecated(st, f)
+        return error {}
+    }
+
+    // A count flag counts one more, or is set outright from its "=value"
+    if flagKindEq((*f).kind, FlagKind.KCount) {
+        if hadEq {
+            e3: error = fset.setValue(idx, val)
+            if e3.exists() {
+                return e3
+            }
+        } else {
+            fset.bump(idx)
+        }
+        parseWarnDeprecated(st, f)
         return error {}
     }
 
@@ -330,13 +353,13 @@ export func parseLongFlag(st: *ParseState, tok: string) -> error {
     }
 
     // Warn when the flag is deprecated
-    parseWarnDeprecated(f)
+    parseWarnDeprecated(st, f)
     return error {}
 }
 
 /**
  * parseShortCluster
- * Consumes one short flag token or cluster such as "-v", "-abc", "-p8080", "-p=8080", "-p 8080"
+ * Consumes one short flag token or cluster such as "-v", "-abc", "-vvv", "-p8080", "-p=8080", "-p 8080"
  * @param st {*ParseState} - the scanner
  * @param tok {string} - the token, starts with "-" followed by a non dash non digit
  * @return a clean error, or the unknown shorthand flag, flag needs an argument or invalid argument error
@@ -371,8 +394,25 @@ export func parseShortCluster(st: *ParseState, tok: string) -> error {
         // A bool flag is set on and the cluster goes on
         if flagKindEq((*f).kind, FlagKind.KBool) {
             fset.setBoolOn(idx)
-            parseWarnDeprecated(f)
+            parseWarnDeprecated(st, f)
             k = k + 1
+            continue
+        }
+
+        // A count flag counts one more per letter, and an "=value" sets it outright and ends the cluster
+        if flagKindEq((*f).kind, FlagKind.KCount) {
+            if k + 1 < n && tok[k + 1] == 61 {
+                e3: error = fset.setValue(idx, substring(tok, k + 2, n))
+                if e3.exists() {
+                    return e3
+                }
+                parseWarnDeprecated(st, f)
+                k = n
+            } else {
+                fset.bump(idx)
+                parseWarnDeprecated(st, f)
+                k = k + 1
+            }
             continue
         }
 
@@ -399,7 +439,7 @@ export func parseShortCluster(st: *ParseState, tok: string) -> error {
         }
 
         // Warn when the flag is deprecated and end the cluster
-        parseWarnDeprecated(f)
+        parseWarnDeprecated(st, f)
         k = n
     }
     return error {}

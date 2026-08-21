@@ -1,0 +1,2 @@
+Error: invalid argument "wasm" for "--emit" flag: must be one of "llvm", "obj"
+Run 'flags --help' for usage.

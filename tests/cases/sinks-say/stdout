@@ -1,0 +1,7 @@
+---- out (11 bytes) ----
+say: hello
+---- end out ----
+---- err (0 bytes) ----
+---- end err ----
+---- code 0 ----
+---- error: none ----

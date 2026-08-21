@@ -1,0 +1,2 @@
+Error: if any flags in the group [user pass] are set they must all be set; missing [pass]
+Run 'groups login --help' for usage.

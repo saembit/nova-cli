@@ -1,0 +1,145 @@
+/**
+ * nova/sink.dusk
+ * Where nova writes, a Sink names one destination and sinkWrite puts the bytes of a string on it, sinkResolveOut and sinkResolveErr pick the sink a chain of commands asks for, the first non Inherit one walking the leaf up to the root
+ * Nothing here frames the text, a Buffer sink appends to a StringBuilder the caller owns and an Fd sink writes the raw bytes to a file descriptor, so every message nova sends carries its own newline
+ **/
+@paradigm oop
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import command
+
+// The runtime's own writers rather than libc write, since std.fs already declares write with a *void buffer and a second declaration of the same symbol would break it
+foreign "C" {
+    func cool_eprint_bytes(p: *raw char, n: int64) -> void
+    func cool_flush() -> void
+    func dprintf(fd: int32, fmt: *raw char, ...) -> int32
+}
+
+/**
+ * Sink
+ * One destination nova writes to, Inherit meaning the command takes whatever its parent uses
+ **/
+export enum Sink { Inherit, Stdout, Stderr, Buffer(sb: *StringBuilder), Fd(fd: int32), Func(f: (string) -> void) }
+
+// Writes the bytes of s to stderr, the way printerr does minus the newline it adds
+func sinkWriteErr(s: string) -> void {
+    // The C copy of the text, cbuf hands out a fresh buffer the caller frees
+    p: *raw char = cbuf(s)
+
+    // The runtime writer flushes stdout itself so the two streams stay in the order they were written
+    cool_eprint_bytes(p, str_len(s))
+
+    // Free the copy
+    free(p)
+}
+
+// Writes the bytes of s straight to a file descriptor, nothing is framed and nothing is buffered
+func sinkWriteFd(fd: int32, s: string) -> void {
+    // Push out whatever print left buffered so the descriptor sees the text in the order it was written
+    cool_flush()
+
+    // The C copies of the format and the text, both fresh buffers this function frees
+    fmt: *raw char = cbuf("%s")
+    p: *raw char = cbuf(s)
+
+    // The number of bytes the descriptor took
+    n: int32 = dprintf(fd, fmt, p)
+
+    // Free both copies
+    free(fmt)
+    free(p)
+
+    // A short or refused write is nothing nova can do anything about
+    if n < 0 {
+        return
+    }
+}
+
+/**
+ * sinkWrite
+ * Writes text to the sink verbatim, an unresolved Inherit going to stdout the way Cobra's OutOrStdout does
+ * @param s {Sink} - the destination
+ * @param text {string} - the bytes to write, borrowed, newline included when the message wants one
+ * @return nothing
+ **/
+export func sinkWrite(s: Sink, text: string) -> void {
+    // Write the text the way the destination wants it
+    match s {
+        Inherit => print(text),
+        Stdout => print(text),
+        Stderr => sinkWriteErr(text),
+        Buffer(sb) => sb_push(sb, text),
+        Fd(fd) => sinkWriteFd(fd, text),
+        Func(f) => f(text),
+    }
+}
+
+/**
+ * sinkIsInherit
+ * Checks if the sink is the Inherit one, the only kind resolution walks past
+ * @param s {Sink} - the sink to test
+ * @return true when it is Inherit
+ **/
+export func sinkIsInherit(s: Sink) -> bool {
+    // Only the Inherit case is one
+    match s {
+        Inherit => return true,
+        Stdout => return false,
+        Stderr => return false,
+        Buffer(sb) => return false,
+        Fd(fd) => return false,
+        Func(f) => return false,
+    }
+}
+
+/**
+ * sinkResolveOut
+ * Gives the out sink of a chain, the first non Inherit one from the leaf up to the root
+ * @param chain {*Vector<*Command>} - the commands root..leaf, borrowed
+ * @return the sink that was found, or Stdout when every command inherits
+ **/
+export func sinkResolveOut(chain: *Vector<*Command>) -> Sink {
+    // Walk the chain from the leaf up to the root
+    mut i: int64 = vec_len(chain) - 1
+    while i >= 0 {
+        // The out sink of the current command
+        c: *Command = vec_get(chain, i)
+        s: Sink = (*c).out
+
+        // The first command that names one wins
+        if !sinkIsInherit(s) {
+            return s
+        }
+        i = i - 1
+    }
+
+    // Nothing on the chain names one
+    return Sink.Stdout
+}
+
+/**
+ * sinkResolveErr
+ * Gives the err sink of a chain, the first non Inherit one from the leaf up to the root
+ * @param chain {*Vector<*Command>} - the commands root..leaf, borrowed
+ * @return the sink that was found, or Stderr when every command inherits
+ **/
+export func sinkResolveErr(chain: *Vector<*Command>) -> Sink {
+    // Walk the chain from the leaf up to the root
+    mut i: int64 = vec_len(chain) - 1
+    while i >= 0 {
+        // The err sink of the current command
+        c: *Command = vec_get(chain, i)
+        s: Sink = (*c).err
+
+        // The first command that names one wins
+        if !sinkIsInherit(s) {
+            return s
+        }
+        i = i - 1
+    }
+
+    // Nothing on the chain names one
+    return Sink.Stderr
+}

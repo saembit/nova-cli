@@ -1,0 +1,9 @@
+---- out (11 bytes) ----
+check: bad
+---- end out ----
+---- err (62 bytes) ----
+Error: cannot check "bad"
+Run 'sinks check --help' for usage.
+---- end err ----
+---- code 1 ----
+---- error: cannot check "bad" ----

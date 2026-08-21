@@ -1,0 +1,8 @@
+---- out (88 bytes) ----
+plain: a help func of its own, no rendered block here
+plain: the command is sinks plain
+---- end out ----
+---- err (0 bytes) ----
+---- end err ----
+---- code 0 ----
+---- error: none ----

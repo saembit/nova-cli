@@ -1,0 +1,8 @@
+---- out (0 bytes) ----
+---- end out ----
+---- err (72 bytes) ----
+Error: unknown command "nope" for "sinks"
+Run 'sinks --help' for usage.
+---- end err ----
+---- code 1 ----
+---- error: unknown command "nope" for "sinks" ----

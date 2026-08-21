@@ -1,0 +1,10 @@
+Print the inherited count
+
+Usage:
+  flags echo [flags]
+
+Flags:
+  -h, --help   help for echo
+
+Global Flags:
+  -v, --verbose   verbosity, repeatable

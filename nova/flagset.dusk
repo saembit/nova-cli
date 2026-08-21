@@ -1,6 +1,6 @@
 /**
  * nova/flagset.dusk
- * The flags a command declares, a FlagSet is a registry of bool, string and int flags with optional one character shorthands, looked up by long name or shorthand and set from raw command line text one token at a time by the executor
+ * The flags a command declares, a FlagSet is a registry of bool, string, int, float, string slice, count and choice flags with optional one character shorthands, looked up by long name or shorthand and set from raw command line text one token at a time by the executor
  * Bad input is an error value the executor reports, misuse of the library such as a duplicate flag, a getter on the wrong kind, etc. aborts with "fatal: nova: ..." on stderr
  **/
 @paradigm oop
@@ -14,11 +14,11 @@
  * FlagKind
  * The value shapes a flag can carry
  **/
-export enum FlagKind { KBool, KStr, KInt }
+export enum FlagKind { KBool, KStr, KInt, KFloat, KStrs, KCount, KChoice }
 
 /**
  * Flag
- * One declared flag, only the def and val pair matching kind is meaningful and the others hold zero values, the strings are borrowed from the caller's literals or argv and never freed here
+ * One declared flag, only the def and val pair matching kind is meaningful and the others hold zero values, the plain strings are borrowed from the caller's literals or argv and never freed here while every string inside defV, valV and choices is a fresh heap copy the flag owns
  **/
 export struct Flag {
     name: string,
@@ -28,9 +28,14 @@ export struct Flag {
     defB: bool,
     defS: string,
     defI: int64,
+    defF: float64,
     valB: bool,
     valS: string,
     valI: int64,
+    valF: float64,
+    defV: *Vector<string>,
+    valV: *Vector<string>,
+    choices: *Vector<string>,
     changed: bool,
     required: bool,
     hidden: bool,
@@ -60,7 +65,7 @@ export func flagsetNew() -> *FlagSet {
 
 /**
  * flagKindWord
- * Gives the type word help prints after a flag name, "" for bool, "string" or "int"
+ * Gives the type word help prints after a flag name, "" for the kinds that take no value and a static word for the rest, a choice has no word of its own since it prints its own alternatives
  * @param k {FlagKind} - the kind
  * @return a static literal
  **/
@@ -70,6 +75,24 @@ export func flagKindWord(k: FlagKind) -> string {
         KBool => return "",
         KStr => return "string",
         KInt => return "int",
+        KFloat => return "float",
+        KStrs => return "strings",
+        KCount => return "",
+        KChoice => return "",
+    }
+}
+
+// The position of a kind in the enum, the number two kinds are compared by
+func flagKindIndex(k: FlagKind) -> int64 {
+    // Pick the position by kind
+    match k {
+        KBool => return 0,
+        KStr => return 1,
+        KInt => return 2,
+        KFloat => return 3,
+        KStrs => return 4,
+        KCount => return 5,
+        KChoice => return 6,
     }
 }
 
@@ -81,12 +104,52 @@ export func flagKindWord(k: FlagKind) -> string {
  * @return true when they match
  **/
 export func flagKindEq(a: FlagKind, b: FlagKind) -> bool {
-    // Match a then b
-    match a {
-        KBool => { match b { KBool => return true, KStr => return false, KInt => return false } },
-        KStr => { match b { KBool => return false, KStr => return true, KInt => return false } },
-        KInt => { match b { KBool => return false, KStr => return false, KInt => return true } },
+    // Compare the two positions
+    return flagKindIndex(a) == flagKindIndex(b)
+}
+
+/**
+ * flagTakesValue
+ * Checks if a flag consumes a value token, every kind but bool and count does
+ * @param f {*Flag} - the flag, borrowed
+ * @return true when the flag wants a value
+ **/
+export func flagTakesValue(f: *Flag) -> bool {
+    // A bool is set by being there
+    if flagKindEq((*f).kind, FlagKind.KBool) {
+        return false
     }
+
+    // A count is counted by being there
+    if flagKindEq((*f).kind, FlagKind.KCount) {
+        return false
+    }
+
+    // Everything else wants a value
+    return true
+}
+
+/**
+ * flagTypeWord
+ * Gives the type word help prints after a flag name, the kind word for most flags and the alternatives joined with "|" for a choice
+ * @param f {*Flag} - the flag, borrowed
+ * @return a fresh heap string, empty for the kinds with no word
+ **/
+export func flagTypeWord(f: *Flag) -> string {
+    // A choice prints its own alternatives
+    if flagKindEq((*f).kind, FlagKind.KChoice) {
+        // The alternatives in declaration order
+        ch: *Vector<string> = (*f).choices
+
+        // Join them with bars
+        return str_join(ch, "|")
+    }
+
+    // The static word of the kind
+    w: string = flagKindWord((*f).kind)
+
+    // Return a copy of it so every caller frees the same way
+    return substring(w, 0, str_len(w))
 }
 
 /**
@@ -156,16 +219,44 @@ func flagInvalidArg(raw: string, name: string, why: string) -> error {
  * @param defB {bool} - the bool default
  * @param defS {string} - the string default
  * @param defI {int64} - the int default
+ * @param defF {float64} - the float default
  * @return a pointer to the new flag
  **/
-func flagMake(name: string, short: string, kind: FlagKind, help: string, defB: bool, defS: string, defI: int64) -> *Flag {
+func flagMake(name: string, short: string, kind: FlagKind, help: string, defB: bool, defS: string, defI: int64, defF: float64) -> *Flag {
+    // The default list, the value list and the choice list, empty until a kind that uses them fills them
+    dv: *Vector<string> = alloc(vec_new())
+    vv: *Vector<string> = alloc(vec_new())
+    ch: *Vector<string> = alloc(vec_new())
+
     // Return the new flag with the value equal to the default
     return alloc(Flag {
         name: name, short: short, kind: kind, help: help,
-        defB: defB, defS: defS, defI: defI,
-        valB: defB, valS: defS, valI: defI,
+        defB: defB, defS: defS, defI: defI, defF: defF,
+        valB: defB, valS: defS, valI: defI, valF: defF,
+        defV: dv, valV: vv, choices: ch,
         changed: false, required: false, hidden: false, deprecated: "",
     })
+}
+
+// Frees the three string lists a flag owns along with their vectors
+func flagFreeLists(f: *Flag) -> void {
+    // The default list
+    dv: *Vector<string> = (*f).defV
+    textFreeStrings(dv)
+    vec_free(dv)
+    free((*f).defV)
+
+    // The value list
+    vv: *Vector<string> = (*f).valV
+    textFreeStrings(vv)
+    vec_free(vv)
+    free((*f).valV)
+
+    // The choice list
+    ch: *Vector<string> = (*f).choices
+    textFreeStrings(ch)
+    vec_free(ch)
+    free((*f).choices)
 }
 
 impl FlagSet {
@@ -314,7 +405,7 @@ impl FlagSet {
         items: *Vector<*Flag> = self.items
 
         // Push the new flag
-        vec_push(items, flagMake(name, short, FlagKind.KBool, help, def, "", 0))
+        vec_push(items, flagMake(name, short, FlagKind.KBool, help, def, "", 0, 0.0))
     }
 
     /**
@@ -334,7 +425,7 @@ impl FlagSet {
         items: *Vector<*Flag> = self.items
 
         // Push the new flag
-        vec_push(items, flagMake(name, short, FlagKind.KStr, help, false, def, 0))
+        vec_push(items, flagMake(name, short, FlagKind.KStr, help, false, def, 0, 0.0))
     }
 
     /**
@@ -354,7 +445,105 @@ impl FlagSet {
         items: *Vector<*Flag> = self.items
 
         // Push the new flag
-        vec_push(items, flagMake(name, short, FlagKind.KInt, help, false, "", def))
+        vec_push(items, flagMake(name, short, FlagKind.KInt, help, false, "", def, 0.0))
+    }
+
+    /**
+     * addFloat
+     * Declares a float flag
+     * @param name {string} - the long name
+     * @param short {string} - one character or ""
+     * @param def {float64} - the default
+     * @param help {string} - the help text
+     * @return nothing
+     **/
+    func addFloat(name: string, short: string, def: float64, help: string) -> void {
+        // Check the names are free
+        self.checkNew(name, short)
+
+        // The item vector
+        items: *Vector<*Flag> = self.items
+
+        // Push the new flag
+        vec_push(items, flagMake(name, short, FlagKind.KFloat, help, false, "", 0, def))
+    }
+
+    /**
+     * addStrs
+     * Declares a string slice flag whose default is written as a comma separated list, "" being the empty list
+     * @param name {string} - the long name
+     * @param short {string} - one character or ""
+     * @param def {string} - the default items, comma separated
+     * @param help {string} - the help text
+     * @return nothing
+     **/
+    func addStrs(name: string, short: string, def: string, help: string) -> void {
+        // Check the names are free
+        self.checkNew(name, short)
+
+        // The item vector
+        items: *Vector<*Flag> = self.items
+
+        // The new flag
+        f: *Flag = flagMake(name, short, FlagKind.KStrs, help, false, "", 0, 0.0)
+
+        // Split the default into the default list and again into the value list, the two never share a string
+        textPushCommas((*f).defV, def)
+        textPushCommas((*f).valV, def)
+
+        // Push the new flag
+        vec_push(items, f)
+    }
+
+    /**
+     * addCount
+     * Declares a count flag, one that counts how many times it was named and starts at zero
+     * @param name {string} - the long name
+     * @param short {string} - one character or ""
+     * @param help {string} - the help text
+     * @return nothing
+     **/
+    func addCount(name: string, short: string, help: string) -> void {
+        // Check the names are free
+        self.checkNew(name, short)
+
+        // The item vector
+        items: *Vector<*Flag> = self.items
+
+        // Push the new flag
+        vec_push(items, flagMake(name, short, FlagKind.KCount, help, false, "", 0, 0.0))
+    }
+
+    /**
+     * addChoice
+     * Declares a choice flag, a string flag whose value must be one of a comma separated list, the default itself must be one of them
+     * @param name {string} - the long name
+     * @param short {string} - one character or ""
+     * @param def {string} - the default, one of the choices
+     * @param choices {string} - the alternatives, comma separated
+     * @param help {string} - the help text
+     * @return nothing
+     **/
+    func addChoice(name: string, short: string, def: string, choices: string, help: string) -> void {
+        // Check the names are free
+        self.checkNew(name, short)
+
+        // The item vector
+        items: *Vector<*Flag> = self.items
+
+        // The new flag
+        f: *Flag = flagMake(name, short, FlagKind.KChoice, help, false, def, 0, 0.0)
+
+        // Split the alternatives into the choice list
+        textPushCommas((*f).choices, choices)
+
+        // A default outside the alternatives is a fault
+        if !vec_contains((*f).choices, def) {
+            novaFault("default for flag '--", name, "' is not one of its choices")
+        }
+
+        // Push the new flag
+        vec_push(items, f)
     }
 
     /**
@@ -399,6 +588,33 @@ impl FlagSet {
         // The wrong kind is the same fault
         if !flagKindEq((*f).kind, kind) {
             novaFault("no " + word + " flag named '--", name, "'")
+        }
+
+        // Return the flag
+        return f
+    }
+
+    /**
+     * requireStrLike
+     * Gives the flag named name, aborts unless it is declared as a string or as a choice, the two kinds getStr reads
+     * @param name {string} - the long name
+     * @return the flag
+     **/
+    func requireStrLike(name: string) -> *Flag {
+        // The index of the flag or -1
+        i: int64 = self.find(name)
+
+        // A missing flag is a fault
+        if i < 0 {
+            novaFault("no string flag named '--", name, "'")
+        }
+
+        // The flag
+        f: *Flag = self.get(i)
+
+        // A kind that carries no string is the same fault
+        if !flagKindEq((*f).kind, FlagKind.KStr) && !flagKindEq((*f).kind, FlagKind.KChoice) {
+            novaFault("no string flag named '--", name, "'")
         }
 
         // Return the flag
@@ -469,8 +685,8 @@ impl FlagSet {
      * @return the value
      **/
     func getStr(name: string) -> string {
-        // The flag checked for kind
-        f: *Flag = self.requireKind(name, FlagKind.KStr, "string")
+        // The flag checked for kind, a string or a choice
+        f: *Flag = self.requireStrLike(name)
 
         // Return the string value
         return (*f).valS
@@ -487,6 +703,48 @@ impl FlagSet {
         f: *Flag = self.requireKind(name, FlagKind.KInt, "int")
 
         // Return the int value
+        return (*f).valI
+    }
+
+    /**
+     * getFloat
+     * Gives the value of the float flag name, aborts unless such a float flag exists
+     * @param name {string} - the long name
+     * @return the value
+     **/
+    func getFloat(name: string) -> float64 {
+        // The flag checked for kind
+        f: *Flag = self.requireKind(name, FlagKind.KFloat, "float")
+
+        // Return the float value
+        return (*f).valF
+    }
+
+    /**
+     * getStrs
+     * Gives the value of the string slice flag name, aborts unless such a flag exists
+     * @param name {string} - the long name
+     * @return the items, borrowed from the flag and never freed by the caller
+     **/
+    func getStrs(name: string) -> *Vector<string> {
+        // The flag checked for kind
+        f: *Flag = self.requireKind(name, FlagKind.KStrs, "strings")
+
+        // Return the value list
+        return (*f).valV
+    }
+
+    /**
+     * getCount
+     * Gives how many times the count flag name was named, aborts unless such a count flag exists
+     * @param name {string} - the long name
+     * @return the count
+     **/
+    func getCount(name: string) -> int64 {
+        // The flag checked for kind
+        f: *Flag = self.requireKind(name, FlagKind.KCount, "count")
+
+        // Return the count
         return (*f).valI
     }
 
@@ -537,6 +795,53 @@ impl FlagSet {
                 }
                 (*f).valI = n
             },
+            KFloat => {
+                // Parse the number
+                x, e := parse_float(raw)
+                if e.exists() {
+                    return flagInvalidArg(raw, (*f).name, "expected a number")
+                }
+                (*f).valF = x
+            },
+            KStrs => {
+                // The first occurrence on the line drops the default, every later one appends
+                if !(*f).changed {
+                    textFreeStrings((*f).valV)
+                }
+
+                // Split the text on commas onto the end of the value list
+                textPushCommas((*f).valV, raw)
+            },
+            KCount => {
+                // Parse the count the "=N" form carries
+                n, e := parse_int(raw)
+                if e.exists() {
+                    return flagInvalidArg(raw, (*f).name, "expected an integer")
+                }
+                (*f).valI = n
+            },
+            KChoice => {
+                // The alternatives this flag was declared with
+                ch: *Vector<string> = (*f).choices
+
+                // A value outside them is the invalid argument error
+                if !vec_contains(ch, raw) {
+                    // The alternatives quoted and joined the way the message lists them
+                    joined: string = textJoinQuoted(ch, ", ")
+
+                    // The reason and the error built around it
+                    why: string = "must be one of " + joined
+                    e2: error = flagInvalidArg(raw, (*f).name, why)
+
+                    // Free the two built strings
+                    free(why)
+                    free(joined)
+                    return e2
+                }
+
+                // Keep the raw text as the value
+                (*f).valS = raw
+            },
         }
 
         // Mark the flag as set
@@ -562,6 +867,21 @@ impl FlagSet {
     }
 
     /**
+     * bump
+     * Adds one to the count of flag i and marks it changed, what a bare count flag on the command line does
+     * @param i {int64} - the flag index
+     * @return nothing
+     **/
+    func bump(i: int64) -> void {
+        // The flag
+        f: *Flag = self.get(i)
+
+        // Raise the count and set the changed bit
+        (*f).valI = (*f).valI + 1
+        (*f).changed = true
+    }
+
+    /**
      * reset
      * Restores every flag to its default and clears changed
      * @return nothing
@@ -580,6 +900,11 @@ impl FlagSet {
             (*f).valB = (*f).defB
             (*f).valS = (*f).defS
             (*f).valI = (*f).defI
+            (*f).valF = (*f).defF
+
+            // Rebuild the value list out of fresh copies of the default list
+            textFreeStrings((*f).valV)
+            textCopyStrings((*f).valV, (*f).defV)
 
             // Clear the changed bit
             (*f).changed = false
@@ -589,7 +914,7 @@ impl FlagSet {
 
     /**
      * freeAll
-     * Frees every Flag in the set and the item vector, the set struct itself is left for the owner to free
+     * Frees every Flag in the set along with the string lists it owns and the item vector, the set struct itself is left for the owner to free
      * @return nothing
      **/
     func freeAll() -> void {
@@ -601,7 +926,8 @@ impl FlagSet {
             // The last flag, now owned here
             f: *Flag = vec_take(items, vec_len(items) - 1)
 
-            // Free the flag
+            // Free the string lists it owns then the flag
+            flagFreeLists(f)
             free(f)
         }
 

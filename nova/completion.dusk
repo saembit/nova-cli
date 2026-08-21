@@ -381,7 +381,7 @@ export func completionZshScript(rootc: *Command, app: string) -> string {
     return out
 }
 
-// The handler of the builtin completion command, writes the script for the named shell to stdout
+// The handler of the builtin completion command, writes the script for the named shell to the out sink
 func completionRun(ctx: *Context) -> int32 {
     // The shell asked for and the app name
     shell: string = ctx.arg(0)
@@ -391,7 +391,7 @@ func completionRun(ctx: *Context) -> int32 {
     // The bash script
     if shell == "bash" {
         bs: string = completionBashScript(rootc, app)
-        print(bs)
+        ctx.print(bs)
         free(bs)
         return 0
     }
@@ -399,7 +399,7 @@ func completionRun(ctx: *Context) -> int32 {
     // The zsh script
     if shell == "zsh" {
         zs: string = completionZshScript(rootc, app)
-        print(zs)
+        ctx.print(zs)
         free(zs)
         return 0
     }
