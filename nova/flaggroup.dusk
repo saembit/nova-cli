@@ -9,6 +9,7 @@
 @import std.string
 @import std.vector
 @import flagset
+@import text
 @import command
 @import context
 
@@ -53,7 +54,7 @@ func flagGroupBracket(v: *Vector<string>) -> string {
     joined: string = str_join(v, " ")
 
     // The joined names wrapped in brackets
-    out: string = "[" + joined + "]"
+    out: string = textCat3("[", joined, "]")
 
     // Free the joined copy
     free(joined)
@@ -64,10 +65,10 @@ func flagGroupBracket(v: *Vector<string>) -> string {
 
 /**
  * flagGroupIsSet
- * Checks if the flag named name was set on the command line, resolved along the chain the way a getter resolves it
+ * Checks if anything gave the flag named name a value, the command line, the environment or a config file, resolved along the chain the way a getter resolves it
  * @param chain {*Vector<*Command>} - the commands root..leaf, borrowed
  * @param name {string} - the long name without dashes
- * @return true when the chain declares the flag and the run changed it
+ * @return true when the chain declares the flag and its value is not the declared default
  **/
 func flagGroupIsSet(chain: *Vector<*Command>, name: string) -> bool {
     // The set holding the flag, its index and whether the chain declares it at all
@@ -81,13 +82,13 @@ func flagGroupIsSet(chain: *Vector<*Command>, name: string) -> bool {
     // The flag itself
     f: *Flag = fset.get(i)
 
-    // Return whether the run set it
-    return (*f).changed
+    // Return whether anything at all set it
+    return flagIsSet(f)
 }
 
 /**
  * flagGroupCheck
- * Checks one group against a run, "set" meaning the flag was changed on the command line, the names resolved along the chain
+ * Checks one group against a run, "set" meaning anything gave the flag a value, the names resolved along the chain
  * @param chain {*Vector<*Command>} - the commands root..leaf, borrowed
  * @param group {*FlagGroup} - the group to check, borrowed
  * @return a clean error when the group holds, or the Cobra message for the rule it broke
@@ -130,7 +131,7 @@ export func flagGroupCheck(chain: *Vector<*Command>, group: *FlagGroup) -> error
                 miss: string = flagGroupBracket(unset)
 
                 // The message naming the group and what is missing from it
-                msg = "if any flags in the group " + all + " are set they must all be set; missing " + miss
+                msg = textCat4("if any flags in the group ", all, " are set they must all be set; missing ", miss)
 
                 // Free the list of missing names
                 free(miss)
@@ -139,7 +140,7 @@ export func flagGroupCheck(chain: *Vector<*Command>, group: *FlagGroup) -> error
         GOneRequired => {
             // None set is the failure
             if vec_len(setNames) == 0 {
-                msg = "at least one of the flags in the group " + all + " is required"
+                msg = textCat3("at least one of the flags in the group ", all, " is required")
             }
         }
         GExclusive => {
@@ -149,7 +150,7 @@ export func flagGroupCheck(chain: *Vector<*Command>, group: *FlagGroup) -> error
                 had: string = flagGroupBracket(setNames)
 
                 // The message naming the group and the names that clashed
-                msg = "if any flags in the group " + all + " are set none of the others can be; " + had + " were all set"
+                msg = textCat5("if any flags in the group ", all, " are set none of the others can be; ", had, " were all set")
 
                 // Free the list of names that were set
                 free(had)

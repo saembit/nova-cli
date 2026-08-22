@@ -17,8 +17,15 @@
 export enum FlagKind { KBool, KStr, KInt, KFloat, KStrs, KCount, KChoice }
 
 /**
+ * FlagSource
+ * Where the value a flag carries came from, the four listed in rising precedence so a later one overwrites an earlier one and never the other way round
+ **/
+export enum FlagSource { SDefault, SConfig, SEnv, SLine }
+
+/**
  * Flag
  * One declared flag, only the def and val pair matching kind is meaningful and the others hold zero values, the plain strings are borrowed from the caller's literals or argv and never freed here while every string inside defV, valV and choices is a fresh heap copy the flag owns
+ * A string or choice value is copied into held, the one plain string the flag does own, since the token, environment variable or config file it was read from goes away as soon as the run is done with it
  **/
 export struct Flag {
     name: string,
@@ -40,6 +47,10 @@ export struct Flag {
     required: bool,
     hidden: bool,
     deprecated: string,
+    env: string,
+    source: FlagSource,
+    held: string,
+    hasHeld: bool,
 }
 
 /**
@@ -106,6 +117,81 @@ func flagKindIndex(k: FlagKind) -> int64 {
 export func flagKindEq(a: FlagKind, b: FlagKind) -> bool {
     // Compare the two positions
     return flagKindIndex(a) == flagKindIndex(b)
+}
+
+/**
+ * flagSourceWord
+ * Gives the word that names where a value came from, what a handler prints when it wants to show the precedence a run settled on
+ * @param s {FlagSource} - the source
+ * @return a static literal, "default", "config", "env" or "flag"
+ **/
+export func flagSourceWord(s: FlagSource) -> string {
+    // Pick the word by source
+    match s {
+        SDefault => return "default",
+        SConfig => return "config",
+        SEnv => return "env",
+        SLine => return "flag",
+    }
+}
+
+// The position of a source in the enum, the number two sources are compared by
+func flagSourceIndex(s: FlagSource) -> int64 {
+    // Pick the position by source
+    match s {
+        SDefault => return 0,
+        SConfig => return 1,
+        SEnv => return 2,
+        SLine => return 3,
+    }
+}
+
+/**
+ * flagSourceEq
+ * Checks if two sources are the same variant since enums do not compare with ==
+ * @param a {FlagSource} - the first source
+ * @param b {FlagSource} - the second source
+ * @return true when they match
+ **/
+export func flagSourceEq(a: FlagSource, b: FlagSource) -> bool {
+    // Compare the two positions
+    return flagSourceIndex(a) == flagSourceIndex(b)
+}
+
+/**
+ * flagIsSet
+ * Checks if anything at all gave the flag its value, the command line, the environment or a config file, the test the required check and the flag groups run
+ * @param f {*Flag} - the flag, borrowed
+ * @return true when the value is not the declared default
+ **/
+export func flagIsSet(f: *Flag) -> bool {
+    // Anything but the default counts
+    return !flagSourceEq((*f).source, FlagSource.SDefault)
+}
+
+/**
+ * flagEnvVarName
+ * Builds the environment variable a prefix and a long flag name name together, the long name upper cased with every dash turned into an underscore
+ * @param prefix {string} - the application prefix without its trailing underscore, borrowed
+ * @param name {string} - the long flag name, borrowed
+ * @return a fresh heap string such as "APP_LOG_LEVEL"
+ **/
+export func flagEnvVarName(prefix: string, name: string) -> string {
+    // The name upper cased
+    up: string = to_upper(name)
+
+    // The dashes a flag name may carry turned into underscores
+    us: string = replace_all(up, "-", "_")
+
+    // The prefix and the name under one underscore
+    out: string = textCat3(prefix, "_", us)
+
+    // Free the two working copies
+    free(us)
+    free(up)
+
+    // Return the variable name
+    return out
 }
 
 /**
@@ -199,10 +285,14 @@ func flagInvalidArg(raw: string, name: string, why: string) -> error {
     // The quoted raw text
     q: string = textQuote(raw)
 
-    // The full message
-    msg: string = "invalid argument " + q + " for \"--" + name + "\" flag: " + why
+    // The message up to the reason
+    head: string = textCat5("invalid argument ", q, " for \"--", name, "\" flag: ")
 
-    // Free the quoted copy
+    // The reason after it
+    msg: string = head + why
+
+    // Free the quoted copy and the halfway result
+    free(head)
     free(q)
 
     // Return the error with the message
@@ -235,11 +325,47 @@ func flagMake(name: string, short: string, kind: FlagKind, help: string, defB: b
         valB: defB, valS: defS, valI: defI, valF: defF,
         defV: dv, valV: vv, choices: ch,
         changed: false, required: false, hidden: false, deprecated: "",
+        env: "", source: FlagSource.SDefault, held: "", hasHeld: false,
     })
 }
 
-// Frees the three string lists a flag owns along with their vectors
+/**
+ * flagDropHeld
+ * Frees the copy an env or config value left on the flag, leaving it holding none
+ * @param f {*Flag} - the flag, borrowed
+ * @return nothing
+ **/
+export func flagDropHeld(f: *Flag) -> void {
+    // Nothing was copied so nothing to free
+    if !(*f).hasHeld {
+        return
+    }
+
+    // Free the copy and forget it
+    free((*f).held)
+    (*f).held = ""
+    (*f).hasHeld = false
+}
+
+// Makes the string value of f a fresh copy of raw the flag itself owns, since the token or variable it was read from goes away
+func flagHold(f: *Flag, raw: string) -> void {
+    // Drop whatever an earlier apply left
+    flagDropHeld(f)
+
+    // The copy the flag keeps
+    c: string = substring(raw, 0, str_len(raw))
+
+    // Point both the held slot and the value at it
+    (*f).held = c
+    (*f).hasHeld = true
+    (*f).valS = c
+}
+
+// Frees the three string lists a flag owns along with their vectors and the one plain string it may own
 func flagFreeLists(f: *Flag) -> void {
+    // The copy an env or config value left behind
+    flagDropHeld(f)
+
     // The default list
     dv: *Vector<string> = (*f).defV
     textFreeStrings(dv)
@@ -257,6 +383,140 @@ func flagFreeLists(f: *Flag) -> void {
     textFreeStrings(ch)
     vec_free(ch)
     free((*f).choices)
+}
+
+/**
+ * flagStore
+ * Parses raw per the kind of f and stores it, the shared half of every setter, leaving the changed bit and the source to the caller that knows where the text came from
+ * @param f {*Flag} - the flag, borrowed
+ * @param raw {string} - the text to parse
+ * @param fresh {bool} - true when the value replaces whatever is there rather than adding to it, which is what everything but a repeated string slice on the command line does
+ * @return a clean error, or the Cobra style invalid argument message
+ **/
+func flagStore(f: *Flag, raw: string, fresh: bool) -> error {
+    // Parse and store by kind
+    match (*f).kind {
+        KBool => {
+            // Parse the bool word
+            b, e := flagParseBool(raw)
+            if e.exists() {
+                return flagInvalidArg(raw, (*f).name, "expected a boolean")
+            }
+            (*f).valB = b
+        },
+        KStr => {
+            // Keep a copy of the text as the value, since the token it came in is a temporary
+            flagHold(f, raw)
+        },
+        KInt => {
+            // Parse the int
+            n, e := parse_int(raw)
+            if e.exists() {
+                return flagInvalidArg(raw, (*f).name, "expected an integer")
+            }
+            (*f).valI = n
+        },
+        KFloat => {
+            // Parse the number
+            x, e := parse_float(raw)
+            if e.exists() {
+                return flagInvalidArg(raw, (*f).name, "expected a number")
+            }
+            (*f).valF = x
+        },
+        KStrs => {
+            // The first occurrence on the line drops the default, every later one appends, and a value from elsewhere always starts over
+            if fresh || !(*f).changed {
+                textFreeStrings((*f).valV)
+            }
+
+            // Split the text on commas onto the end of the value list
+            textPushCommas((*f).valV, raw)
+        },
+        KCount => {
+            // Parse the count the "=N" form carries
+            n, e := parse_int(raw)
+            if e.exists() {
+                return flagInvalidArg(raw, (*f).name, "expected an integer")
+            }
+            (*f).valI = n
+        },
+        KChoice => {
+            // The alternatives this flag was declared with
+            ch: *Vector<string> = (*f).choices
+
+            // A value outside them is the invalid argument error
+            if !vec_contains(ch, raw) {
+                // The alternatives quoted and joined the way the message lists them
+                joined: string = textJoinQuoted(ch, ", ")
+
+                // The reason and the error built around it
+                why: string = "must be one of " + joined
+                e2: error = flagInvalidArg(raw, (*f).name, why)
+
+                // Free the two built strings
+                free(why)
+                free(joined)
+                return e2
+            }
+
+            // Keep a copy of the text as the value, since the token it came in is a temporary
+            flagHold(f, raw)
+        },
+    }
+
+    // Nothing went wrong
+    return error {}
+}
+
+/**
+ * flagApplyValue
+ * Parses raw per the kind of f and stores it as a value that did not come from the command line, recording where it did come from and leaving the changed bit alone
+ * @param f {*Flag} - the flag, borrowed
+ * @param raw {string} - the text from the environment or a config file, borrowed and copied where the kind keeps a string
+ * @param src {FlagSource} - SEnv or SConfig, whichever is applying the value
+ * @return a clean error, or the same invalid argument message the command line would have earned
+ **/
+export func flagApplyValue(f: *Flag, raw: string, src: FlagSource) -> error {
+    // Parse and store the text, keeping a copy of it where the kind holds a string
+    e: error = flagStore(f, raw, true)
+
+    // A value the kind refuses leaves the flag as it was
+    if e.exists() {
+        return e
+    }
+
+    // Record where the value came from
+    (*f).source = src
+
+    // Nothing went wrong
+    return error {}
+}
+
+/**
+ * flagApplyStrs
+ * Replaces the items of a string slice flag with fresh copies of items, what a config file's JSON array gives rather than a comma separated line
+ * @param f {*Flag} - the flag, borrowed, declared as a string slice
+ * @param items {*Vector<string>} - the items, borrowed and copied one by one
+ * @param src {FlagSource} - SEnv or SConfig, whichever is applying the value
+ * @return nothing
+ **/
+export func flagApplyStrs(f: *Flag, items: *Vector<string>, src: FlagSource) -> void {
+    // The value list, which starts over rather than growing
+    vv: *Vector<string> = (*f).valV
+    textFreeStrings(vv)
+
+    // Loop over the items in order
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        // The current item copied onto the value list
+        it: string = vec_get(items, i)
+        vec_push(vv, substring(it, 0, str_len(it)))
+        i = i + 1
+    }
+
+    // Record where the value came from
+    (*f).source = src
 }
 
 impl FlagSet {
@@ -665,6 +925,35 @@ impl FlagSet {
     }
 
     /**
+     * bindEnv
+     * Binds name to one environment variable by its exact spelling, which wins over the name a command's env prefix would give it
+     * @param name {string} - the long name
+     * @param varName {string} - the environment variable, borrowed
+     * @return nothing
+     **/
+    func bindEnv(name: string, varName: string) -> void {
+        // The flag
+        f: *Flag = self.require(name)
+
+        // Store the variable name
+        (*f).env = varName
+    }
+
+    /**
+     * source
+     * Gives where the value of name came from, aborts when it is not declared
+     * @param name {string} - the long name
+     * @return the source, SDefault when nothing set it
+     **/
+    func source(name: string) -> FlagSource {
+        // The flag
+        f: *Flag = self.require(name)
+
+        // Return the source
+        return (*f).source
+    }
+
+    /**
      * getBool
      * Gives the value of the bool flag name, aborts unless such a bool flag exists
      * @param name {string} - the long name
@@ -764,7 +1053,7 @@ impl FlagSet {
 
     /**
      * setValue
-     * Parses raw per the kind of flag i, stores it and marks the flag changed, raw is borrowed and kept as the string value
+     * Parses raw per the kind of flag i, stores it and marks the flag set from the command line, raw is borrowed and a string kind keeps a copy of it
      * @param i {int64} - the flag index
      * @param raw {string} - the text from the command line
      * @return a clean error, or the Cobra style invalid argument message
@@ -773,79 +1062,17 @@ impl FlagSet {
         // The flag
         f: *Flag = self.get(i)
 
-        // Parse and store by kind
-        match (*f).kind {
-            KBool => {
-                // Parse the bool word
-                b, e := flagParseBool(raw)
-                if e.exists() {
-                    return flagInvalidArg(raw, (*f).name, "expected a boolean")
-                }
-                (*f).valB = b
-            },
-            KStr => {
-                // Keep the raw text as the value
-                (*f).valS = raw
-            },
-            KInt => {
-                // Parse the int
-                n, e := parse_int(raw)
-                if e.exists() {
-                    return flagInvalidArg(raw, (*f).name, "expected an integer")
-                }
-                (*f).valI = n
-            },
-            KFloat => {
-                // Parse the number
-                x, e := parse_float(raw)
-                if e.exists() {
-                    return flagInvalidArg(raw, (*f).name, "expected a number")
-                }
-                (*f).valF = x
-            },
-            KStrs => {
-                // The first occurrence on the line drops the default, every later one appends
-                if !(*f).changed {
-                    textFreeStrings((*f).valV)
-                }
+        // Parse and store the text, a repeated string slice adding to what the line already gave it
+        e: error = flagStore(f, raw, false)
 
-                // Split the text on commas onto the end of the value list
-                textPushCommas((*f).valV, raw)
-            },
-            KCount => {
-                // Parse the count the "=N" form carries
-                n, e := parse_int(raw)
-                if e.exists() {
-                    return flagInvalidArg(raw, (*f).name, "expected an integer")
-                }
-                (*f).valI = n
-            },
-            KChoice => {
-                // The alternatives this flag was declared with
-                ch: *Vector<string> = (*f).choices
-
-                // A value outside them is the invalid argument error
-                if !vec_contains(ch, raw) {
-                    // The alternatives quoted and joined the way the message lists them
-                    joined: string = textJoinQuoted(ch, ", ")
-
-                    // The reason and the error built around it
-                    why: string = "must be one of " + joined
-                    e2: error = flagInvalidArg(raw, (*f).name, why)
-
-                    // Free the two built strings
-                    free(why)
-                    free(joined)
-                    return e2
-                }
-
-                // Keep the raw text as the value
-                (*f).valS = raw
-            },
+        // A value the kind refuses leaves the flag as it was
+        if e.exists() {
+            return e
         }
 
-        // Mark the flag as set
+        // Mark the flag as set on the line
         (*f).changed = true
+        (*f).source = FlagSource.SLine
 
         // Return a clean error
         return error {}
@@ -861,9 +1088,10 @@ impl FlagSet {
         // The flag
         f: *Flag = self.get(i)
 
-        // Set the value and the changed bit
+        // Set the value, the changed bit and where it came from
         (*f).valB = true
         (*f).changed = true
+        (*f).source = FlagSource.SLine
     }
 
     /**
@@ -876,14 +1104,15 @@ impl FlagSet {
         // The flag
         f: *Flag = self.get(i)
 
-        // Raise the count and set the changed bit
+        // Raise the count, set the changed bit and record where it came from
         (*f).valI = (*f).valI + 1
         (*f).changed = true
+        (*f).source = FlagSource.SLine
     }
 
     /**
      * reset
-     * Restores every flag to its default and clears changed
+     * Restores every flag to its default, clears changed and puts the source back to SDefault
      * @return nothing
      **/
     func reset() -> void {
@@ -896,6 +1125,9 @@ impl FlagSet {
             // The current flag
             f: *Flag = vec_get(items, i)
 
+            // Drop the copy an env or config value left behind
+            flagDropHeld(f)
+
             // Copy the defaults back over the values
             (*f).valB = (*f).defB
             (*f).valS = (*f).defS
@@ -906,8 +1138,9 @@ impl FlagSet {
             textFreeStrings((*f).valV)
             textCopyStrings((*f).valV, (*f).defV)
 
-            // Clear the changed bit
+            // Clear the changed bit and go back to holding the default
             (*f).changed = false
+            (*f).source = FlagSource.SDefault
             i = i + 1
         }
     }

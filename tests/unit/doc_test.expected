@@ -1,0 +1,90 @@
+fixup run exit 0
+
+== page app ==
+## app
+
+A tiny application
+
+### Synopsis
+
+app is a tiny application whose only job is to be documented.
+
+```
+app [flags]
+```
+
+### Examples
+
+```
+  app serve --port 9090
+  app config set key value
+```
+
+### Options
+
+```
+  -c, --config string   config file
+  -h, --help            help for app
+  -q, --quiet           print nothing
+      --version         version for app
+```
+
+### SEE ALSO
+
+* [app config](app_config.md)	 - Read and write configuration
+* [app serve](app_serve.md)	 - Serve traffic
+
+--
+== page app serve ==
+## app serve
+
+Serve traffic
+
+### Synopsis
+
+serve listens on a port until it is stopped.
+
+```
+app serve [flags]
+```
+
+### Examples
+
+```
+  app serve --port 9090 --tag a,b
+```
+
+### Options
+
+```
+  -e, --emit llvm|obj   what to emit (default "llvm")
+  -h, --help            help for serve
+  -H, --host string     host to bind (default "localhost")
+  -p, --port int        port to listen on (default 8080)
+      --rate float      requests per second (default 2.5)
+  -t, --tag strings     tags to attach (default [a,b])
+  -v, --verbose         verbosity, repeat for more
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string   config file
+```
+
+### SEE ALSO
+
+* [app](app.md)	 - A tiny application
+
+--
+docFileName app config set -> app_config_set.md
+
+docWriteTree ok
+wrote app.md
+wrote app_config.md
+wrote app_config_set.md
+wrote app_serve.md
+
+## per call leak
+docMarkdown render and free: 0
+docWriteTree: 0

@@ -1,0 +1,2 @@
+Error: config examples/config/bad-choice.json: invalid value for "--emit": must be one of "llvm", "obj"
+Run 'config show --help' for usage.

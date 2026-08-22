@@ -1,0 +1,1 @@
+config serve --config examples/config/good.json

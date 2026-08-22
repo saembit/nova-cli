@@ -12,13 +12,19 @@
  * my_cmdCmd() is a legal dusk name while cmdNew("my-cmd", ...) keeps the real command name
  * the user typed. Names reach these templates only after scaffoldValidName has accepted
  * them, so no name can carry a quote, a backslash, or whitespace into a generated string
- * literal.
+ * literal. The flags of a --flags subcommand arrive the same way, already parsed and checked
+ * by cli/flagspec.dusk, so a default is spliced in as it stands too, and every local a
+ * handler reads one into carries a Flag suffix so a flag named for a dusk keyword, such as
+ * for or match, still names something the generated file can declare.
  **/
 
 @paradigm procedural
 
 @import std.string
+@import std.vector
+
 @import scaffold
+@import flagspec
 
 /**
  * tplHeader
@@ -69,9 +75,10 @@ export func tplRootFile(name: string) -> string {
  * tplRootCmd
  * Builds <dir>/cmd/root.dusk, the root command constructor and its handler
  * @param name {string} - the application name, which becomes the command's own name
+ * @param docs {bool} - true to hang nova's hidden docs command off the root
  * @return the complete file text as a fresh heap string
  **/
-export func tplRootCmd(name: string) -> string {
+export func tplRootCmd(name: string, docs: bool) -> string {
     // The builder every line is pushed onto
     b: *StringBuilder = alloc(sb_new())
 
@@ -82,7 +89,13 @@ export func tplRootCmd(name: string) -> string {
     sb_push(b, "@paradigm procedural\n\n")
     sb_push(b, "@import nova.command\n")
     sb_push(b, "@import nova.context\n")
-    sb_push(b, "@import nova.flagset\n\n")
+    sb_push(b, "@import nova.flagset\n")
+
+    // The docs command lives in its own module, imported only when it is wired in
+    if docs {
+        sb_push(b, "@import nova.doc\n")
+    }
+    sb_push(b, "\n")
 
     // The handler's doc block
     sb_push(b, "/**\n")
@@ -137,6 +150,12 @@ export func tplRootCmd(name: string) -> string {
     sb_push(b, "    c.setRun(rootRun)\n\n")
     sb_push(b, "    // A flag every command in the tree inherits\n")
     sb_push(b, "    c.persistentFlags().addBool(\"verbose\", \"v\", false, \"verbose output\")\n\n")
+
+    // The hidden docs command, spliced in above the return c that anchors every later add
+    if docs {
+        sb_push(b, "    // The hidden docs command, which writes a markdown page per command\n")
+        sb_push(b, "    c.addCommand(docCommandNew())\n\n")
+    }
     sb_push(b, "    return c\n")
     sb_push(b, "}\n")
 
@@ -149,17 +168,214 @@ export func tplRootCmd(name: string) -> string {
 }
 
 /**
+ * tplKindGetter
+ * The Context getter one flag kind is read with
+ * @param k {SpecKind} - the kind
+ * @return the method name, a static literal
+ **/
+func tplKindGetter(k: SpecKind) -> string {
+    // One getter per kind, a choice reading back as the string it is
+    match k {
+        SBool => return "getBool",
+        SStr => return "getStr",
+        SInt => return "getInt",
+        SFloat => return "getFloat",
+        SStrs => return "getStrs",
+        SCount => return "getCount",
+        SChoice => return "getStr",
+    }
+    return "getStr"
+}
+
+/**
+ * tplKindType
+ * The dusk type the local holding one flag kind is annotated with
+ * @param k {SpecKind} - the kind
+ * @return the type text, a static literal
+ **/
+func tplKindType(k: SpecKind) -> string {
+    // One type per kind, a count being the int64 it counts into
+    match k {
+        SBool => return "bool",
+        SStr => return "string",
+        SInt => return "int64",
+        SFloat => return "float64",
+        SStrs => return "*Vector<string>",
+        SCount => return "int64",
+        SChoice => return "string",
+    }
+    return "string"
+}
+
+/**
+ * tplHasStrs
+ * Whether any flag in a spec is a string slice, which is what pulls std into the generated file
+ * @param specs {*Vector<*FlagSpec>} - the parsed flags
+ * @return true when one of them is a strs flag
+ **/
+func tplHasStrs(specs: *Vector<*FlagSpec>) -> bool {
+    // Cursor over the flags
+    mut i: int64 = 0
+
+    // Loop looking for the one kind whose local needs a type and a join
+    while i < vec_len(specs) {
+        f: *FlagSpec = vec_get(specs, i)
+        if specKindIsStrs(f) {
+            return true
+        }
+        i = i + 1
+    }
+
+    // No strs flag, so the file needs nothing from std
+    return false
+}
+
+/**
+ * tplPushFlagDecl
+ * Appends the one localFlags().addX line a flag declares itself with
+ * @param b {*StringBuilder} - the builder the file is assembled on
+ * @param f {*FlagSpec} - the parsed flag
+ * @return nothing
+ **/
+func tplPushFlagDecl(b: *StringBuilder, f: *FlagSpec) -> void {
+    // The name as typed and the shorthand, which may be empty
+    name: string = (*f).name
+    short: string = (*f).short
+
+    // The call, whose method is the kind's own
+    sb_push(b, "    c.localFlags().")
+    match (*f).kind {
+        SBool => sb_push(b, "addBool("),
+        SStr => sb_push(b, "addStr("),
+        SInt => sb_push(b, "addInt("),
+        SFloat => sb_push(b, "addFloat("),
+        SStrs => sb_push(b, "addStrs("),
+        SCount => sb_push(b, "addCount("),
+        SChoice => sb_push(b, "addChoice("),
+    }
+
+    // The two names every kind takes first
+    sb_push(b, "\"")
+    sb_push(b, name)
+    sb_push(b, "\", \"")
+    sb_push(b, short)
+    sb_push(b, "\", ")
+
+    // The default, quoted for the kinds whose default is text and left bare for the rest
+    match (*f).kind {
+        SBool => {
+            sb_push(b, (*f).def)
+            sb_push(b, ", ")
+        }
+        SStr => {
+            sb_push(b, "\"")
+            sb_push(b, (*f).def)
+            sb_push(b, "\", ")
+        }
+        SInt => {
+            sb_push(b, (*f).def)
+            sb_push(b, ", ")
+        }
+        SFloat => {
+            sb_push(b, (*f).def)
+            sb_push(b, ", ")
+        }
+        SStrs => {
+            sb_push(b, "\"")
+            sb_push(b, (*f).def)
+            sb_push(b, "\", ")
+        }
+        SCount => {
+            sb_push(b, "")
+        }
+        SChoice => {
+            sb_push(b, "\"")
+            sb_push(b, (*f).def)
+            sb_push(b, "\", \"")
+            sb_push(b, (*f).choices)
+            sb_push(b, "\", ")
+        }
+    }
+
+    // The help text, which is the last argument of every one of them
+    sb_push(b, "\"the ")
+    sb_push(b, name)
+    sb_push(b, " flag\")\n")
+}
+
+/**
+ * tplPushFlagRead
+ * Appends the two blocks that read one flag into a local and print what it holds
+ * @param b {*StringBuilder} - the builder the file is assembled on
+ * @param f {*FlagSpec} - the parsed flag
+ * @return nothing
+ **/
+func tplPushFlagRead(b: *StringBuilder, f: *FlagSpec) -> void {
+    // The name as typed and the identifier it sanitizes to
+    name: string = (*f).name
+    id: string = scaffoldIdent(name)
+
+    // The local the flag is read into, suffixed so a flag named for a dusk keyword, such as
+    // for or match, still declares a name the generated file compiles with
+    local: string = id + "Flag"
+    free(id)
+
+    // The local, annotated with the type its getter hands back
+    sb_push(b, "    // The ")
+    sb_push(b, name)
+    sb_push(b, " flag\n")
+    sb_push(b, "    ")
+    sb_push(b, local)
+    sb_push(b, ": ")
+    sb_push(b, tplKindType((*f).kind))
+    sb_push(b, " = ctx.")
+    sb_push(b, tplKindGetter((*f).kind))
+    sb_push(b, "(\"")
+    sb_push(b, name)
+    sb_push(b, "\")\n\n")
+
+    // A string slice prints as the comma separated list it was declared with
+    if specKindIsStrs(f) {
+        sb_push(b, "    // Print its items joined the way they were declared\n")
+        sb_push(b, "    ")
+        sb_push(b, local)
+        sb_push(b, "Joined: string = str_join(")
+        sb_push(b, local)
+        sb_push(b, ", \",\")\n")
+        sb_push(b, "    println(\"")
+        sb_push(b, name)
+        sb_push(b, "={}\", ")
+        sb_push(b, local)
+        sb_push(b, "Joined)\n")
+        sb_push(b, "    free(")
+        sb_push(b, local)
+        sb_push(b, "Joined)\n\n")
+    } else {
+        sb_push(b, "    // Print what it holds\n")
+        sb_push(b, "    println(\"")
+        sb_push(b, name)
+        sb_push(b, "={}\", ")
+        sb_push(b, local)
+        sb_push(b, ")\n\n")
+    }
+    free(local)
+}
+
+/**
  * tplSubCmd
- * Builds <dir>/cmd/<id>_cmd.dusk, one subcommand with its handler and a local flag
+ * Builds <dir>/cmd/<id>_cmd.dusk, one subcommand with its handler and its flags
  * @param name {string} - the subcommand name as typed, which may contain dashes
  * @param parent {string} - the parent command's name, mentioned in the long description
+ * @param specs {*Vector<*FlagSpec>} - the parsed --flags, empty for the plain template
  * @return the complete file text as a fresh heap string
  **/
-export func tplSubCmd(name: string, parent: string) -> string {
+export func tplSubCmd(name: string, parent: string, specs: *Vector<*FlagSpec>) -> string {
     // The sanitized identifier the constructor and the handler are named after
     id: string = scaffoldIdent(name)
     // The upper case name the loud branch prints
     shout: string = to_upper(name)
+    // How many flags the spec declared, none meaning the plain template
+    nflags: int64 = vec_len(specs)
 
     // The builder every line is pushed onto
     b: *StringBuilder = alloc(sb_new())
@@ -171,7 +387,14 @@ export func tplSubCmd(name: string, parent: string) -> string {
     sb_push(b, "@paradigm procedural\n\n")
     sb_push(b, "@import nova.command\n")
     sb_push(b, "@import nova.context\n")
-    sb_push(b, "@import nova.flagset\n\n")
+    sb_push(b, "@import nova.flagset\n")
+
+    // A strs flag reads back a vector and prints it joined, which is all std buys the file
+    if tplHasStrs(specs) {
+        sb_push(b, "\n@import std.string\n")
+        sb_push(b, "@import std.vector\n")
+    }
+    sb_push(b, "\n")
 
     // The handler's doc block
     sb_push(b, "/**\n")
@@ -185,22 +408,41 @@ export func tplSubCmd(name: string, parent: string) -> string {
     sb_push(b, " * @return 0\n")
     sb_push(b, " **/\n")
 
-    // The handler, <id>Run, which reads the local flag and prints either way
+    // The handler, <id>Run
     sb_push(b, "func ")
     sb_push(b, id)
     sb_push(b, "Run(ctx: *Context) -> int32 {\n")
-    sb_push(b, "    // The local flag, which this command alone reads\n")
-    sb_push(b, "    loud: bool = ctx.getBool(\"loud\")\n\n")
-    sb_push(b, "    // Shout it when the flag is set, say it plainly otherwise\n")
-    sb_push(b, "    if loud {\n")
-    sb_push(b, "        println(\"")
-    sb_push(b, shout)
-    sb_push(b, " CALLED\")\n")
-    sb_push(b, "    } else {\n")
-    sb_push(b, "        println(\"")
-    sb_push(b, name)
-    sb_push(b, " called\")\n")
-    sb_push(b, "    }\n\n")
+
+    // With no flags declared it reads the one bool the plain template gives it
+    if nflags == 0 {
+        sb_push(b, "    // The local flag, which this command alone reads\n")
+        sb_push(b, "    loud: bool = ctx.getBool(\"loud\")\n\n")
+        sb_push(b, "    // Shout it when the flag is set, say it plainly otherwise\n")
+        sb_push(b, "    if loud {\n")
+        sb_push(b, "        println(\"")
+        sb_push(b, shout)
+        sb_push(b, " CALLED\")\n")
+        sb_push(b, "    } else {\n")
+        sb_push(b, "        println(\"")
+        sb_push(b, name)
+        sb_push(b, " called\")\n")
+        sb_push(b, "    }\n\n")
+    } else {
+        // With a spec it says it ran and then prints one line per declared flag
+        sb_push(b, "    // Say the command ran, ahead of everything its flags hold\n")
+        sb_push(b, "    println(\"")
+        sb_push(b, name)
+        sb_push(b, " called\")\n\n")
+
+        // Cursor over the flags
+        mut i: int64 = 0
+
+        // Loop reading each flag into a local and printing it
+        while i < nflags {
+            tplPushFlagRead(b, vec_get(specs, i))
+            i = i + 1
+        }
+    }
     sb_push(b, "    // Report success\n")
     sb_push(b, "    return int32(0)\n")
     sb_push(b, "}\n\n")
@@ -236,14 +478,32 @@ export func tplSubCmd(name: string, parent: string) -> string {
     sb_push(b, "    c.setRun(")
     sb_push(b, id)
     sb_push(b, "Run)\n\n")
-    sb_push(b, "    // A flag this command alone reads\n")
-    sb_push(b, "    c.localFlags().addBool(\"loud\", \"l\", false, \"shout the output\")\n\n")
+
+    // The flags, the one the plain template gives or the ones the spec declared
+    if nflags == 0 {
+        sb_push(b, "    // A flag this command alone reads\n")
+        sb_push(b, "    c.localFlags().addBool(\"loud\", \"l\", false, \"shout the output\")\n\n")
+    } else {
+        sb_push(b, "    // The flags --flags declared, which this command alone reads\n")
+
+        // Cursor over the flags
+        mut j: int64 = 0
+
+        // Loop declaring each one in the order it was written
+        while j < nflags {
+            tplPushFlagDecl(b, vec_get(specs, j))
+            j = j + 1
+        }
+        sb_push(b, "\n")
+    }
     sb_push(b, "    return c\n")
     sb_push(b, "}\n")
 
     // Copy the builder out before freeing it
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)
+    free(id)
+    free(shout)
 
     // The finished file text
     return out

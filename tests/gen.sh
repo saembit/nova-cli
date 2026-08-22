@@ -14,8 +14,11 @@
 # The first scenario is the dusk 1.14 one and it is the whole point of the file, a git
 # repository is made out of the working tree, nova-cli init writes a package.dawn that
 # requires it, dawn get fetches it into dawn_modules/, and the generated project builds with
-# no symlink and no vendored copy anywhere in it. --vendor keeps the pre 1.14 shape alive
-# underneath, and every scenario after the first one uses it.
+# no symlink and no vendored copy anywhere in it. The second one is the same shape with the
+# 0.3.0 switches on, --license and --docs at init and --flags on the add, and it builds the
+# application, runs the command to read its flag values back, and has it write its own
+# markdown. --vendor keeps the pre 1.14 shape alive underneath, and every scenario after
+# those two uses it.
 #
 # The sandbox lives under $NOVA_GEN_WORK when that is set, else under the scratch directory
 # named below, else under mktemp -d.
@@ -251,6 +254,121 @@ want_no_path "init --no-fetch locks nothing" "$sandbox/nofetch/dawn.lock"
 attempt_sh "cd $(printf %q "$sandbox/nofetch") && dawn get && dawn build"
 want_code "dawn get then dawn build after --no-fetch" 0
 want_dir  "dawn get fetched nova into the --no-fetch project" "$sandbox/nofetch/dawn_modules/nova"
+
+# ---------------------------------------------------------------- flags, license, docs
+#
+# The 0.3.0 generator switches, on a second manifest project. --license writes the LICENSE,
+# --docs wires nova's docs command into the root, and --flags declares one flag of every kind
+# on an added command, whose generated handler prints each of them back. The application is
+# built and run to read those values, and then asked for its own markdown.
+
+year="$(date -u +%Y)"
+flagspec='port/p:int=8080,name:string=world,rate:float=2.5,tag/t:strs=a|b,loudness/V:count,emit/e:choice[llvm|obj]=obj,force/f:bool=true'
+
+attempt "$novacli" init fapp --dir fapp --source "file://$srcrepo" --ref main --license mit --docs --author "Ada Lovelace"
+want_code "init fapp --license mit --docs" 0
+want_file "init --license writes LICENSE" "$sandbox/fapp/LICENSE"
+want_grep "LICENSE names the holder and this year" "$sandbox/fapp/LICENSE" "Copyright (c) $year Ada Lovelace"
+want_grep "LICENSE is the MIT text" "$sandbox/fapp/LICENSE" "MIT License"
+want_grep "--docs imports the doc module" "$sandbox/fapp/cmd/root.dusk" "@import nova.doc"
+want_grep "--docs wires the docs command in" "$sandbox/fapp/cmd/root.dusk" "c.addCommand(docCommandNew())"
+
+attempt "$novacli" add serve --dir fapp --flags "$flagspec"
+want_code "add serve --flags with every kind" 0
+want_grep "--flags declares the int flag" "$sandbox/fapp/cmd/serve_cmd.dusk" 'c.localFlags().addInt("port", "p", 8080, "the port flag")'
+want_grep "--flags declares the string flag" "$sandbox/fapp/cmd/serve_cmd.dusk" 'c.localFlags().addStr("name", "", "world", "the name flag")'
+want_grep "--flags declares the float flag" "$sandbox/fapp/cmd/serve_cmd.dusk" 'c.localFlags().addFloat("rate", "", 2.5, "the rate flag")'
+want_grep "--flags turns a bar list into the strs default" "$sandbox/fapp/cmd/serve_cmd.dusk" 'c.localFlags().addStrs("tag", "t", "a,b", "the tag flag")'
+want_grep "--flags declares the count flag" "$sandbox/fapp/cmd/serve_cmd.dusk" 'c.localFlags().addCount("loudness", "V", "the loudness flag")'
+want_grep "--flags declares the choice flag" "$sandbox/fapp/cmd/serve_cmd.dusk" 'c.localFlags().addChoice("emit", "e", "obj", "llvm,obj", "the emit flag")'
+want_grep "--flags declares the bool flag" "$sandbox/fapp/cmd/serve_cmd.dusk" 'c.localFlags().addBool("force", "f", true, "the force flag")'
+want_grep "the handler reads the strs flag with the right getter" "$sandbox/fapp/cmd/serve_cmd.dusk" 'tagFlag: *Vector<string> = ctx.getStrs("tag")'
+want_grep "the handler reads the count flag with the right getter" "$sandbox/fapp/cmd/serve_cmd.dusk" 'loudnessFlag: int64 = ctx.getCount("loudness")'
+
+# A second command whose spec is all the awkward parts: a flag named for a dusk keyword, a
+# float default written as 1e5, and an int default written as +5. Every generated local
+# carries a Flag suffix so forFlag declares where for would not, and both numeric defaults
+# reach the file as the literal their parsed value prints back as, since dusk knows neither
+# 1e5 nor +5.
+
+attempt "$novacli" add odd --dir fapp --flags 'for:bool=true,rate:float=1e5,g:int=+5,match/m:string=x'
+want_code "add odd --flags with a keyword name and odd defaults" 0
+want_grep "a keyword flag name reads into a suffixed local" "$sandbox/fapp/cmd/odd_cmd.dusk" '    forFlag: bool = ctx.getBool("for")'
+want_grep "a keyword flag name is still the name that is declared" "$sandbox/fapp/cmd/odd_cmd.dusk" 'c.localFlags().addBool("for", "", true, "the for flag")'
+want_grep "an exponent float default renders as a literal dusk parses" "$sandbox/fapp/cmd/odd_cmd.dusk" 'c.localFlags().addFloat("rate", "", 100000.0, "the rate flag")'
+want_grep "a signed int default renders without its sign" "$sandbox/fapp/cmd/odd_cmd.dusk" 'c.localFlags().addInt("g", "", 5, "the g flag")'
+
+attempt_sh "cd $(printf %q "$sandbox/fapp") && dusk build fapp.dusk && ./target/dusk-out/fapp serve -p 99 --name hi --rate 1.5 --tag c --tag d,e -VV --emit llvm"
+want_code "build fapp and run the command --flags declared" 0
+want_out "the int flag reads back" "port=99"
+want_out "the string flag reads back" "name=hi"
+want_out "the float flag reads back" "rate=1.5"
+want_out "the strs flag reads back appended" "tag=c,d,e"
+want_out "the count flag reads back" "loudness=2"
+want_out "the choice flag reads back" "emit=llvm"
+want_out "the bool flag reads back its default" "force=true"
+
+attempt_sh "cd $(printf %q "$sandbox/fapp") && ./target/dusk-out/fapp odd"
+want_code "run the command whose flags are named after dusk keywords" 0
+want_out "the keyword flag reads back" "for=true"
+want_out "the exponent default reads back" "rate=100000"
+want_out "the signed int default reads back" "g=5"
+
+# A spec nova-cli cannot parse is refused before anything is written, with 2 so a script can
+# tell it from a clean run and from the 1 an illegal name gives.
+
+attempt "$novacli" add nope --dir fapp --flags "port:sting"
+want_code "add with an unknown kind is refused" 2
+want_err "the refusal names the entry and the reason" 'Error: invalid flag spec "port:sting": unknown kind "sting"'
+want_no_path "the refused add writes nothing" "$sandbox/fapp/cmd/nope_cmd.dusk"
+
+attempt "$novacli" add nope --dir fapp --flags "port:int=abc"
+want_code "add with a default of the wrong type is refused" 2
+want_err "the refusal names the default" 'default "abc" is not an integer'
+
+attempt "$novacli" add nope --dir fapp --flags 'p"ort:bool'
+want_code "add with a quote in a flag name is refused" 2
+want_err "the refusal names the flag" 'invalid flag name "p"ort"'
+
+attempt "$novacli" add nope --dir fapp --flags "h:float=inf"
+want_code "add with an infinite float default is refused" 2
+want_err "the refusal says the default is not finite" 'default "inf" is not a finite number'
+
+attempt "$novacli" add nope --dir fapp --flags "a-b:int,a_b:int"
+want_code "add with two names that sanitize alike is refused" 2
+want_err "the refusal names both of them" 'duplicate flag name "a_b", which shares the local a_b with "a-b"'
+want_no_path "the refused duplicate writes nothing" "$sandbox/fapp/cmd/nope_cmd.dusk"
+
+# The docs command --docs wired in writes one page per visible command, and the flag block on
+# a page is the one --help prints, header aside.
+
+attempt_sh "cd $(printf %q "$sandbox/fapp") && dawn run docs mydocs"
+want_code "dawn run docs mydocs" 0
+want_file "docs writes the root page" "$sandbox/fapp/mydocs/fapp.md"
+want_file "docs writes the added command's page" "$sandbox/fapp/mydocs/fapp_serve.md"
+want_file "docs writes the builtin help page" "$sandbox/fapp/mydocs/fapp_help.md"
+want_no_path "docs writes no page for itself" "$sandbox/fapp/mydocs/fapp_docs.md"
+want_grep "the page heads with the command path" "$sandbox/fapp/mydocs/fapp_serve.md" "## fapp serve"
+want_grep "the page carries the help flag lines" "$sandbox/fapp/mydocs/fapp_serve.md" '  -p, --port int        the port flag (default 8080)'
+want_grep "the page carries the inherited flags" "$sandbox/fapp/mydocs/fapp_serve.md" "### Options inherited from parent commands"
+want_grep "the page links back to its parent" "$sandbox/fapp/mydocs/fapp_serve.md" "* [fapp](fapp.md)"
+want_grep "the root page links to its children" "$sandbox/fapp/mydocs/fapp.md" "* [fapp serve](fapp_serve.md)"
+
+attempt_sh "cd $(printf %q "$sandbox/fapp") && ./target/dusk-out/fapp serve --help"
+want_code "fapp serve --help" 0
+
+# The Flags: block of the help, from the header to the blank line that closes it
+printf '%s\n' "$out" | awk '/^Flags:$/ { f = 1; next } f && /^$/ { exit } f { print }' > "$sandbox/.helpblock"
+
+# The Options block of the page, which is the same lines between the two fences
+awk '/^### Options$/ { f = 1; next } f && /^```$/ { c++; next } f && c == 1 { print } c == 2 { exit }' \
+    "$sandbox/fapp/mydocs/fapp_serve.md" > "$sandbox/.docblock"
+
+if [ -s "$sandbox/.helpblock" ] && diff -u "$sandbox/.helpblock" "$sandbox/.docblock" >"$sandbox/.blockdiff" 2>&1; then
+    ok "the page Options block is the help Flags block byte for byte"
+else
+    bad "the page Options block differs from the help Flags block" "$(cat "$sandbox/.blockdiff")"
+fi
 
 # ---------------------------------------------------------------- init, vendored
 

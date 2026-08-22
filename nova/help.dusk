@@ -25,7 +25,7 @@ func helpFlagGap() -> int64 {
  * @return a fresh heap string
  **/
 export func novaVersionString(rootc: *Command) -> string {
-    return (*rootc).name + " version " + (*rootc).version
+    return textCat3((*rootc).name, " version ", (*rootc).version)
 }
 
 /**
@@ -230,13 +230,20 @@ func helpFlagDefault(f: *Flag) -> string {
             if (*f).defS == "" {
                 return substring("", 0, 0)
             }
-            return " (default \"" + (*f).defS + "\")"
+            return textCat3(" (default \"", (*f).defS, "\")")
         },
         KInt => {
             if (*f).defI == 0 {
                 return substring("", 0, 0)
             }
-            return " (default " + int_to_string((*f).defI) + ")"
+
+            // The number as text, wrapped in the suffix
+            n: string = int_to_string((*f).defI)
+            out: string = textCat3(" (default ", n, ")")
+
+            // Free the rendered number
+            free(n)
+            return out
         },
         KFloat => {
             // The float default, rendered the way dusk itself prints one
@@ -244,7 +251,14 @@ func helpFlagDefault(f: *Flag) -> string {
             if x == 0.0 {
                 return substring("", 0, 0)
             }
-            return " (default " + f"{x}" + ")"
+
+            // The number as text, wrapped in the suffix
+            fx: string = f"{x}"
+            outf: string = textCat3(" (default ", fx, ")")
+
+            // Free the rendered number
+            free(fx)
+            return outf
         },
         KStrs => {
             // The default items, printed in the pflag shape with no spaces
@@ -253,16 +267,16 @@ func helpFlagDefault(f: *Flag) -> string {
                 return substring("", 0, 0)
             }
             joined: string = str_join(dv, ",")
-            out: string = " (default [" + joined + "])"
+            outv: string = textCat3(" (default [", joined, "])")
             free(joined)
-            return out
+            return outv
         },
         KCount => return substring("", 0, 0),
         KChoice => {
             if (*f).defS == "" {
                 return substring("", 0, 0)
             }
-            return " (default \"" + (*f).defS + "\")"
+            return textCat3(" (default \"", (*f).defS, "\")")
         },
     }
     return substring("", 0, 0)
@@ -340,10 +354,13 @@ func helpPushFlags(sb: *StringBuilder, subject: *Command, wrap: int64) -> void {
     helpCollectVisible(flags, taken, localf)
     helpCollectVisible(flags, taken, pfl)
 
+    // The description of the --help line, which the synthesized flag borrows
+    synthHelp: string = helpFlagHelp(subject)
+
     // Synthesize the --help flag when none is declared, the set lives until the lines are pushed
     synth: *FlagSet = flagsetNew()
     if !vec_contains(taken, "help") {
-        synth.addBool("help", "h", false, helpFlagHelp(subject))
+        synth.addBool("help", "h", false, synthHelp)
         vec_push(flags, synth.get(0))
     }
 
@@ -352,9 +369,10 @@ func helpPushFlags(sb: *StringBuilder, subject: *Command, wrap: int64) -> void {
     sb_push(sb, "\nFlags:\n")
     helpPushFlagLines(sb, flags, wrap)
 
-    // Free the synthesized set and the two vectors, the flags and names inside are borrowed
+    // Free the synthesized set, its description and the two vectors, the flags and names inside are borrowed
     synth.freeAll()
     free(synth)
+    free(synthHelp)
     vec_free(flags)
     free(flags)
     vec_free(taken)
@@ -602,7 +620,7 @@ func helpCommandRun(ctx: *Context) -> int32 {
     // Words left over under a command with subcommands is an unknown topic
     if i < vec_len(words) && last.numChildren() > 0 {
         joined: string = str_join(words, " ")
-        line: string = "Unknown help topic [" + joined + "]\n"
+        line: string = textCat3("Unknown help topic [", joined, "]\n")
         sinkWrite(sinkResolveErr((*ctx).chain), line)
         free(line)
         free(joined)
@@ -645,8 +663,12 @@ export func helpCommandNew(appName: string) -> *Command {
     // The command with its use and short
     c: *Command = cmdNew("help [command]", "Help about any command")
 
-    // The long description and the handler
-    c.setLong("Help provides help for any command in the application.\nSimply type " + appName + " help [path to command] for full details.")
+    // The long description as one owned string, which the tree frees along with the command
+    long: string = textCat3("Help provides help for any command in the application.\nSimply type ", appName, " help [path to command] for full details.")
+    c.setLong(long)
+    (*c).longOwned = true
+
+    // The handler
     c.setRun(helpCommandRun)
 
     // Mark it builtin so inherited required flags skip it

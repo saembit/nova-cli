@@ -1,0 +1,517 @@
+/**
+ * nova/config.dusk
+ * The environment and config file bindings, configApply hands every flag of a run that the command line left alone a value from an environment variable or from a JSON file, the line beating the environment and the environment beating the file
+ * A config file is read whole and parsed with std.json, a flat object keyed by long flag name plus an optional object keyed by a command name holding the same shape for that command, the command's own section winning, and every key naming no flag of the run is ignored
+ **/
+@paradigm oop
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.os
+@import std.json
+@import std.functional.maybe
+@import flagset
+@import text
+@import command
+@import context
+
+// Whether a flag of that long name is already on the list
+func configHasName(out: *Vector<*Flag>, name: string) -> bool {
+    // Loop over the flags collected so far
+    mut i: int64 = 0
+    while i < vec_len(out) {
+        // Return on a name match
+        f: *Flag = vec_get(out, i)
+        if (*f).name == name {
+            return true
+        }
+        i = i + 1
+    }
+
+    // Nothing carries the name yet
+    return false
+}
+
+// Pushes every flag of one set onto out, skipping a long name a nearer command already claimed
+func configPushSet(out: *Vector<*Flag>, fset: *FlagSet) -> void {
+    // Loop over the flags in declaration order
+    mut i: int64 = 0
+    while i < fset.len() {
+        // The current flag, kept unless a nearer command shadows its name
+        f: *Flag = fset.get(i)
+        if !configHasName(out, (*f).name) {
+            vec_push(out, f)
+        }
+        i = i + 1
+    }
+}
+
+/**
+ * configEffective
+ * Collects every flag the leaf of a chain can take, its own set first and then the persistent set of each chain entry from the leaf up to the root, the way a getter resolves a name so a flag nearer the leaf hides an ancestor's of the same long name
+ * @param out {*Vector<*Flag>} - the vector the flags are pushed onto, borrowed
+ * @param chain {*Vector<*Command>} - the commands root..leaf, borrowed
+ * @return nothing
+ **/
+export func configEffective(out: *Vector<*Flag>, chain: *Vector<*Command>) -> void {
+    // The chain length and the leaf it ends at
+    n: int64 = vec_len(chain)
+    leaf: *Command = vec_get(chain, n - 1)
+
+    // The leaf's own flags come first
+    configPushSet(out, (*leaf).flags)
+
+    // Then the persistent flags of every entry from the leaf up to the root
+    mut k: int64 = n - 1
+    while k >= 0 {
+        c: *Command = vec_get(chain, k)
+        configPushSet(out, (*c).pflags)
+        k = k - 1
+    }
+}
+
+// Reads one environment variable and applies it to a flag, an unset or empty variable leaving the flag alone since std.os cannot tell the two apart
+func configReadEnv(f: *Flag, varName: string) -> error {
+    // What the environment holds, a fresh string either way
+    v: string = env(varName)
+
+    // An empty value counts as unset
+    if v == "" {
+        free(v)
+        return error {}
+    }
+
+    // Apply the text the way the command line would have parsed it
+    e: error = flagApplyValue(f, v, FlagSource.SEnv)
+
+    // Free the copy the environment handed over, the flag kept one of its own
+    free(v)
+
+    // Return whatever the kind made of the text
+    return e
+}
+
+/**
+ * configApplyEnv
+ * Gives every flag the command line left alone the value of its environment variable, the one it was bound to by name or the one the prefix names for it
+ * @param flags {*Vector<*Flag>} - the effective flags of the run, borrowed
+ * @param prefix {string} - the resolved env prefix, "" when only explicit bindings are read
+ * @return a clean error, or the invalid argument message a value the kind refuses earns
+ **/
+export func configApplyEnv(flags: *Vector<*Flag>, prefix: string) -> error {
+    // Loop over the flags of the run
+    mut i: int64 = 0
+    while i < vec_len(flags) {
+        // The current flag
+        f: *Flag = vec_get(flags, i)
+
+        // The command line beats the environment, so a flag it set is left alone
+        if !flagSourceEq((*f).source, FlagSource.SLine) {
+            // An explicit binding names its variable outright
+            if (*f).env != "" {
+                e: error = configReadEnv(f, (*f).env)
+                if e.exists() {
+                    return e
+                }
+            } else if prefix != "" {
+                // Otherwise the prefix and the long name name it together
+                varName: string = flagEnvVarName(prefix, (*f).name)
+                e2: error = configReadEnv(f, varName)
+                free(varName)
+                if e2.exists() {
+                    return e2
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    // Every variable that was set applied cleanly
+    return error {}
+}
+
+// The "config <path>: <reason>" message every config failure carries
+func configError(path: string, reason: string) -> error {
+    // Build the message around the path and the reason
+    return error { message: textCat4("config ", path, ": ", reason) }
+}
+
+// The word a kind expects of a config value, the same tail the command line parser prints
+func configExpectedWord(k: FlagKind) -> string {
+    // Pick the word by kind
+    match k {
+        KBool => return "expected a boolean",
+        KStr => return "expected a string",
+        KInt => return "expected an integer",
+        KFloat => return "expected a number",
+        KStrs => return "expected a list of strings",
+        KCount => return "expected an integer",
+        KChoice => return "must be one of",
+    }
+}
+
+// The tail the message of a refused value carries, a choice spelling out its alternatives
+func configExpected(f: *Flag) -> string {
+    // A choice lists what it does take
+    if flagKindEq((*f).kind, FlagKind.KChoice) {
+        // The alternatives quoted and joined the way the parser lists them
+        joined: string = textJoinQuoted((*f).choices, ", ")
+
+        // The tail built around them
+        out: string = "must be one of " + joined
+
+        // Free the joined copy
+        free(joined)
+        return out
+    }
+
+    // The static word of the kind
+    w: string = configExpectedWord((*f).kind)
+
+    // Return a copy of it so every caller frees the same way
+    return substring(w, 0, str_len(w))
+}
+
+// The message a value the flag cannot take earns, "invalid value for "--port": expected an integer" under the config path
+func configBadValue(f: *Flag, path: string) -> error {
+    // What the kind would have taken
+    tail: string = configExpected(f)
+
+    // The reason naming the flag and what it wanted
+    reason: string = textCat4("invalid value for \"--", (*f).name, "\": ", tail)
+
+    // The full message under the config path
+    e: error = configError(path, reason)
+
+    // Free the two working strings
+    free(reason)
+    free(tail)
+    return e
+}
+
+// Applies text to a flag as a config value, the parser's own complaint giving way to the config message
+func configApplyText(f: *Flag, raw: string, path: string) -> error {
+    // Parse and store the text the way the command line would have
+    e: error = flagApplyValue(f, raw, FlagSource.SConfig)
+
+    // A value the kind took needs no message
+    if !e.exists() {
+        return error {}
+    }
+
+    // Drop the parser's message for the one a config file earns
+    free(e.message)
+    return configBadValue(f, path)
+}
+
+// Collects the payloads of a JSON array of strings onto out, false as soon as an item is something else
+func configStrings(items: *Vector<*Json>, out: *Vector<string>) -> bool {
+    // Loop over the items in order
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        // The current item, which has to be a string
+        it: *Json = vec_get(items, i)
+        match *it {
+            JStr(sv) => vec_push(out, sv),
+            JNull => return false,
+            JBool(b) => return false,
+            JNum(n) => return false,
+            JArr(sub) => return false,
+            JObj(fields) => return false,
+        }
+        i = i + 1
+    }
+
+    // Every item was a string
+    return true
+}
+
+// Applies one JSON value to one flag, the conversions the contract allows and the invalid value message for everything else
+func configConvert(f: *Flag, j: *Json, path: string) -> error {
+    // Convert by what the document holds
+    match *j {
+        JNull => return configBadValue(f, path),
+        JBool(b) => {
+            // Only a bool flag takes a JSON boolean
+            if !flagKindEq((*f).kind, FlagKind.KBool) {
+                return configBadValue(f, path)
+            }
+
+            // Hand the parser the word it knows
+            return configApplyText(f, textBool(b), path)
+        }
+        JNum(n) => {
+            // A float takes the number at the precision std.json emits it with
+            if flagKindEq((*f).kind, FlagKind.KFloat) {
+                t: string = json_emit(j)
+                e: error = configApplyText(f, t, path)
+                free(t)
+                return e
+            }
+
+            // An int and a count take a whole number and nothing else
+            if flagKindEq((*f).kind, FlagKind.KInt) || flagKindEq((*f).kind, FlagKind.KCount) {
+                // The number cut down to a whole one
+                iv: int64 = int64(n)
+
+                // A fraction is not an integer
+                if n != float64(iv) {
+                    return configBadValue(f, path)
+                }
+
+                // Hand the parser the digits
+                t2: string = int_to_string(iv)
+                e2: error = configApplyText(f, t2, path)
+                free(t2)
+                return e2
+            }
+
+            // Every other kind refuses a number
+            return configBadValue(f, path)
+        }
+        JStr(sv) => {
+            // A string slice takes a list and never one string
+            if flagKindEq((*f).kind, FlagKind.KStrs) {
+                return configBadValue(f, path)
+            }
+
+            // Every other kind parses the text the way the command line would
+            return configApplyText(f, sv, path)
+        }
+        JArr(items) => {
+            // Only a string slice takes a list
+            if !flagKindEq((*f).kind, FlagKind.KStrs) {
+                return configBadValue(f, path)
+            }
+
+            // The items, which all have to be strings
+            parts: *Vector<string> = alloc(vec_new())
+            ok: bool = configStrings(items, parts)
+
+            // A list holding anything else is refused whole
+            if !ok {
+                vec_free(parts)
+                free(parts)
+                return configBadValue(f, path)
+            }
+
+            // Replace the value list with copies of the items
+            flagApplyStrs(f, parts, FlagSource.SConfig)
+
+            // Free the working vector, the strings inside belong to the document
+            vec_free(parts)
+            free(parts)
+            return error {}
+        }
+        JObj(fields) => return configBadValue(f, path),
+    }
+}
+
+// The value a JSON object holds under key, the object itself standing in when it holds none or is no object at all
+func configField(o: *Json, key: string) -> (*Json, bool) {
+    // Look the key up when the value is an object
+    match *o {
+        JObj(fields) => {
+            // What the map holds under the key
+            m: Maybe<*Json> = map_get(fields, key)
+            match m {
+                Some(v) => return (v, true),
+                None => return (o, false),
+            }
+        }
+        JNull => return (o, false),
+        JBool(b) => return (o, false),
+        JNum(n) => return (o, false),
+        JStr(s) => return (o, false),
+        JArr(items) => return (o, false),
+    }
+}
+
+// Whether a JSON value is an object
+func configIsObj(j: *Json) -> bool {
+    // Only the object case answers yes
+    match *j {
+        JObj(fields) => return true,
+        JNull => return false,
+        JBool(b) => return false,
+        JNum(n) => return false,
+        JStr(s) => return false,
+        JArr(items) => return false,
+    }
+}
+
+// The section of a document belonging to one command, the object under its name, the document itself standing in when there is none
+func configSection(rootj: *Json, name: string) -> (*Json, bool) {
+    // What the document holds under the command's name
+    v, ok := configField(rootj, name)
+
+    // No such key at all
+    if !ok {
+        return (rootj, false)
+    }
+
+    // A key holding something other than an object is not a section
+    if !configIsObj(v) {
+        return (rootj, false)
+    }
+
+    // The section itself
+    return (v, true)
+}
+
+// Walks the flags of the run over a parsed document, the command's own section beating the flat key, the first value a flag refuses stopping the walk
+func configWalk(flags: *Vector<*Flag>, rootj: *Json, name: string, path: string) -> error {
+    // The command's own section, when the document carries one
+    sect, hasSect := configSection(rootj, name)
+
+    // Loop over the flags of the run
+    mut i: int64 = 0
+    while i < vec_len(flags) {
+        // The current flag
+        f: *Flag = vec_get(flags, i)
+
+        // The command line and the environment both beat the file
+        if flagSourceEq((*f).source, FlagSource.SDefault) {
+            // Whether the command's own section already gave the flag a value
+            mut done: bool = false
+
+            // The section is looked in first
+            if hasSect {
+                sv, sok := configField(sect, (*f).name)
+                if sok {
+                    se: error = configConvert(f, sv, path)
+                    if se.exists() {
+                        return se
+                    }
+                    done = true
+                }
+            }
+
+            // Then the flat key, which the section overrode, a top level object is always a section and never a value
+            if !done {
+                fv, fok := configField(rootj, (*f).name)
+                if fok && !configIsObj(fv) {
+                    fe: error = configConvert(f, fv, path)
+                    if fe.exists() {
+                        return fe
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    // Every key the run recognised applied cleanly
+    return error {}
+}
+
+/**
+ * configApplyFile
+ * Reads the config file the chain names and gives every flag neither the command line nor the environment set the value the file holds for it
+ * @param flags {*Vector<*Flag>} - the effective flags of the run, borrowed
+ * @param chain {*Vector<*Command>} - the commands root..leaf, borrowed
+ * @return a clean error, or the "config <path>: <reason>" message the file earned
+ **/
+export func configApplyFile(flags: *Vector<*Flag>, chain: *Vector<*Command>) -> error {
+    // The leaf of the chain, whose name a section is keyed by
+    leaf: *Command = vec_get(chain, vec_len(chain) - 1)
+
+    // The flag whose value may name a file instead of the default one
+    flagName: string = cmdResolveConfigFlag(chain)
+
+    // The path to read and whether a file that is not there is an error
+    mut path: string = ""
+    mut strict: bool = false
+
+    // A flag the line set names the file and makes reading it compulsory
+    if flagName != "" {
+        fset, fi, found := ctxLookupChain(chain, flagName)
+        if found && fi >= 0 {
+            cf: *Flag = fset.get(fi)
+            if (*cf).changed && (*cf).valS != "" {
+                path = (*cf).valS
+                strict = true
+            }
+        }
+    }
+
+    // Otherwise the default path, whose absence is silent
+    if path == "" {
+        path = cmdResolveConfigFile(chain)
+    }
+
+    // No file to read at all
+    if path == "" {
+        return error {}
+    }
+
+    // The whole file as text
+    text, re := read_file(path)
+
+    // A file that will not open is an error only when a flag asked for it by name
+    if re.exists() {
+        if !strict {
+            return error {}
+        }
+        return configError(path, re.message)
+    }
+
+    // The document the text spells out
+    doc, je := json_parse(text)
+
+    // The text is done with either way
+    free(text)
+
+    // Malformed JSON carries std.json's own complaint
+    if je.exists() {
+        e: error = configError(path, je.message)
+        json_free(doc)
+        return e
+    }
+
+    // A document that is not an object holds no keys to read
+    if !configIsObj(doc) {
+        e2: error = configError(path, "expected an object")
+        json_free(doc)
+        return e2
+    }
+
+    // Apply what the document holds for the flags of the run
+    we: error = configWalk(flags, doc, (*leaf).name, path)
+
+    // Free the document, whose strings the flags copied out of it
+    json_free(doc)
+    return we
+}
+
+/**
+ * configApply
+ * Gives the flags of a run everything the command line did not, the environment first and the config file after it, so a value on the line wins over one in the environment and that wins over one in the file
+ * @param chain {*Vector<*Command>} - the commands root..leaf, borrowed
+ * @return a clean error, or the first message a value the run refuses earned, whose string the caller takes over
+ **/
+export func configApply(chain: *Vector<*Command>) -> error {
+    // Every flag the leaf can take, nearest declaration first
+    flags: *Vector<*Flag> = alloc(vec_new())
+    configEffective(flags, chain)
+
+    // The prefix the environment variables are named after
+    prefix: string = cmdResolveEnvPrefix(chain)
+
+    // The environment, which only the command line beats
+    mut e: error = configApplyEnv(flags, prefix)
+
+    // The file, which the environment beats in turn
+    if !e.exists() {
+        e = configApplyFile(flags, chain)
+    }
+
+    // Free the working vector, the flags inside belong to the tree
+    vec_free(flags)
+    free(flags)
+
+    // Return the first complaint either pass had
+    return e
+}

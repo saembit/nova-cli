@@ -26,6 +26,12 @@
  * is written without its @require line. --link is the same thing with a symlink in place of
  * the copy.
  *
+ * --license writes a LICENSE beside the four, its year taken from the clock and its holder
+ * from --author, else from git config user.name, else left as "the author". --docs hangs
+ * nova's hidden docs command off the generated root, which writes a markdown page per
+ * command, and it is written into cmd/root.dusk rather than spliced in afterwards so the
+ * wiring anchors a later nova-cli add looks for are the ones it already has.
+ *
  * Nothing is ever overwritten, an existing path is reported skipped and left exactly as it
  * was, so init is safe to re-run over a project you have started editing. Re-running it with
  * a different name is refused instead, since two root files in one directory would both
@@ -44,9 +50,11 @@
 
 @import std.string
 @import std.fs
+@import std.time
 
 @import scaffold
 @import templates
+@import licenses
 
 /**
  * initDefaultSource
@@ -91,6 +99,73 @@ func initProjectName(ctx: *Context, dir: string) -> string {
 
     // The directory's own name
     return base
+}
+
+/**
+ * initYear
+ * This year, which is the year a generated LICENSE carries
+ * @return the four digit year as a fresh heap string
+ **/
+func initYear() -> string {
+    // The clock, broken into a UTC calendar date
+    c: Civil = civil_from_unix(now_unix())
+
+    // Only the year of it matters here
+    return int_to_string(c.year)
+}
+
+/**
+ * initHolder
+ * Who a generated LICENSE names as the copyright holder
+ * @param ctx {*Context} - the running context, read for --author
+ * @return the author flag, else git config user.name, else "the author"
+ **/
+func initHolder(ctx: *Context) -> string {
+    // The flag wins whenever it was given
+    author: string = ctx.getStr("author")
+    if str_len(author) > 0 {
+        return author
+    }
+
+    // Whoever is committing in this checkout, which is the name the file would carry anyway
+    name, found := scaffoldGitUserName()
+    if found {
+        return name
+    }
+
+    // Nothing to go on, so the line is left for the user to finish
+    return "the author"
+}
+
+/**
+ * initWriteLicense
+ * Writes LICENSE when --license names one, and nothing at all when it says none
+ * @param ctx {*Context} - the running context, read for --license and --author
+ * @param dir {string} - the project directory
+ * @return an empty error on success or when there is no license to write, or the write failure
+ **/
+func initWriteLicense(ctx: *Context, dir: string) -> error {
+    // The license asked for, which nova's choice flag has already checked
+    kind: string = ctx.getStr("license")
+
+    // The year and the holder the text is filled in with
+    year: string = initYear()
+    holder: string = initHolder(ctx)
+
+    // The text, paired with whether there is one at all
+    text, wanted := licText(kind, year, holder)
+    free(year)
+
+    // none writes no file, which is the default
+    if !wanted {
+        free(text)
+        return error {}
+    }
+
+    // Write it beside the four files every project gets
+    e := initWrite(path_join(dir, "LICENSE"), text)
+    free(text)
+    return e
 }
 
 /**
@@ -264,9 +339,10 @@ func initHasOtherRoot(dir: string, name: string) -> bool {
  * @param source {string} - the @require source, unused when vendored
  * @param ref {string} - the @require reference, unused when vendored
  * @param vendored {bool} - true to leave the manifest's @require line out
+ * @param docs {bool} - true to wire nova's hidden docs command into the root command
  * @return an empty error on success, or the first write failure
  **/
-func initWriteFiles(dir: string, name: string, source: string, ref: string, vendored: bool) -> error {
+func initWriteFiles(dir: string, name: string, source: string, ref: string, vendored: bool, docs: bool) -> error {
     // The manifest, which is what makes the directory a dawn project
     me := initWrite(path_join(dir, "package.dawn"), tplPackageDawn(name, source, ref, vendored))
     if me.exists() {
@@ -280,7 +356,7 @@ func initWriteFiles(dir: string, name: string, source: string, ref: string, vend
     }
 
     // The root command constructor
-    ce := initWrite(path_join(dir, "cmd/root.dusk"), tplRootCmd(name))
+    ce := initWrite(path_join(dir, "cmd/root.dusk"), tplRootCmd(name, docs))
     if ce.exists() {
         return ce
     }
@@ -305,6 +381,8 @@ func initRun(ctx: *Context) -> int32 {
     vendored: bool = ctx.getBool("vendor") || link
     // Whether dawn get is skipped
     noFetch: bool = ctx.getBool("no-fetch")
+    // Whether the root command gets nova's hidden docs command
+    docs: bool = ctx.getBool("docs")
     // The repository the manifest requires nova from
     source: string = ctx.getStr("source")
     // The git reference it pins nova at
@@ -337,9 +415,15 @@ func initRun(ctx: *Context) -> int32 {
     }
 
     // Write the manifest, the root program, the root command, and the .gitignore
-    fe := initWriteFiles(dir, name, source, ref, vendored)
+    fe := initWriteFiles(dir, name, source, ref, vendored, docs)
     if fe.exists() {
         return ctx.fail(fe.message)
+    }
+
+    // Write the LICENSE, which --license none leaves out
+    le := initWriteLicense(ctx, dir)
+    if le.exists() {
+        return ctx.fail(le.message)
     }
 
     // A vendored or linked project carries the library itself and never calls dawn
@@ -393,9 +477,9 @@ export func initCmd() -> *Command {
     c: *Command = cmdNew("init [name]", "Scaffold a new nova application")
 
     // The long description shown by --help
-    c.setLong("Initialize a nova application in --dir: a package.dawn requiring the nova library, a root program, a cmd/ directory holding the root command, and a .gitignore. `dawn get` then fetches nova into dawn_modules/, which --no-fetch skips.\nThe name defaults to the last component of --dir, or \"app\" when --dir is \".\".\n--vendor writes the pre-1.14 shape instead: the library copied into <dir>/nova, reached from cmd/ through a symlink, and no requirement in the manifest. --link symlinks that copy.\nExisting files are never overwritten.")
+    c.setLong("Initialize a nova application in --dir: a package.dawn requiring the nova library, a root program, a cmd/ directory holding the root command, and a .gitignore. `dawn get` then fetches nova into dawn_modules/, which --no-fetch skips.\nThe name defaults to the last component of --dir, or \"app\" when --dir is \".\".\n--license writes a LICENSE too, filled in with this year and with --author, git config user.name, or \"the author\", and --docs wires nova's docs command into the root so the application can write its own markdown.\n--vendor writes the pre-1.14 shape instead: the library copied into <dir>/nova, reached from cmd/ through a symlink, and no requirement in the manifest. --link symlinks that copy.\nExisting files are never overwritten.")
     // The examples shown under it
-    c.setExample("  nova-cli init myapp --dir myapp\n  nova-cli init --dir . --ref v0.2.0\n  nova-cli init myapp --dir myapp --vendor")
+    c.setExample("  nova-cli init myapp --dir myapp\n  nova-cli init --dir . --ref v0.3.0\n  nova-cli init myapp --dir myapp --license mit --docs\n  nova-cli init myapp --dir myapp --vendor")
 
     // At most one positional, the name
     c.setArgs(argsMax(1))
@@ -406,6 +490,13 @@ export func initCmd() -> *Command {
     c.localFlags().addStr("dir", "d", ".", "directory to scaffold into")
     c.localFlags().addStr("source", "s", initDefaultSource(), "repository to require the nova library from")
     c.localFlags().addStr("ref", "r", initDefaultRef(), "git tag, branch, or commit to pin the nova library at")
+
+    // The license the project carries and who it names, which default to none and to git
+    c.localFlags().addChoice("license", "l", "none", licKinds(), "license to write to LICENSE")
+    c.localFlags().addStr("author", "a", "", "copyright holder, defaults to git config user.name")
+
+    // Whether the root command is wired to nova's docs command
+    c.localFlags().addBool("docs", "", false, "wire nova's docs command into the root command")
 
     // The three switches that pick the mode
     c.localFlags().addBool("no-fetch", "", false, "write the manifest but do not run dawn get")

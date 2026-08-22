@@ -1,0 +1,257 @@
+// config is a nova application built around the environment and config file
+// bindings. The root sets an env prefix, a default config file that is not there
+// and the name of the flag that points at another one, so every command under it
+// takes its flags from the command line, the environment, the file or its own
+// declaration, in that order. Build it from this directory with
+// dusk build config.dusk, the nova entry beside this file is a symlink to the
+// library at the repository root.
+//
+// The JSON files beside this one are the fixtures the golden tests read,
+// good.json for the values that apply, bad.json for text that is not JSON,
+// wrong-type.json and bad-choice.json for values a flag refuses and list.json
+// for a JSON array becoming a string slice.
+//
+// Nothing is persisted, every command prints the value of each flag together
+// with where it came from so the golden tests stay deterministic.
+@paradigm procedural
+
+// The nova library: the command tree, the run context, flags, argument rules
+// and the executor
+@import std.string
+@import std.vector
+@import nova.command
+@import nova.context
+@import nova.flagset
+@import nova.args
+@import nova.text
+@import nova.exec
+
+/**
+ * showOne
+ * Prints one flag as "name=value (source)", the shape every command here reports in
+ * @param name {string} - the long flag name
+ * @param value {string} - the value already rendered as text
+ * @param src {FlagSource} - where the value came from
+ * @return void
+ **/
+func showOne(name: string, value: string, src: FlagSource) -> void {
+    // One line per flag, the source word after the value
+    println("{}={} ({})", name, value, flagSourceWord(src))
+}
+
+/**
+ * runShow
+ * Prints every flag of the show command with the source that gave it its value
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runShow(ctx: *Context) -> int32 {
+    // The string kinds, printed as they stand
+    showOne("name", ctx.getStr("name"), ctx.source("name"))
+
+    // The int, rendered as digits
+    port: string = int_to_string(ctx.getInt("port"))
+    showOne("port", port, ctx.source("port"))
+    free(port)
+
+    // The float, rendered the way dusk itself prints one
+    rate: float64 = ctx.getFloat("rate")
+    rateText: string = f"{rate}"
+    showOne("rate", rateText, ctx.source("rate"))
+    free(rateText)
+
+    // The string slice, joined with commas so an item holding a space still shows
+    tags: string = str_join(ctx.getStrs("tags"), ",")
+    showOne("tags", tags, ctx.source("tags"))
+    free(tags)
+
+    // The choice, which is validated wherever its value came from
+    showOne("emit", ctx.getStr("emit"), ctx.source("emit"))
+
+    // The count, rendered as digits
+    level: string = int_to_string(ctx.getCount("level"))
+    showOne("level", level, ctx.source("level"))
+    free(level)
+
+    // The bool and the flag only an explicit binding reaches
+    showOne("dry", textBool(ctx.getBool("dry")), ctx.source("dry"))
+    showOne("label", ctx.getStr("label"), ctx.source("label"))
+
+    // The root's persistent flag, which every command inherits
+    showOne("verbose", textBool(ctx.getBool("verbose")), ctx.source("verbose"))
+
+    // Showing cannot fail here
+    return 0
+}
+
+/**
+ * runServe
+ * Prints the two flags a config file's own section for this command can set
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runServe(ctx: *Context) -> int32 {
+    // The port, which the "serve" section of a file sets over the flat key
+    port: string = int_to_string(ctx.getInt("port"))
+    showOne("port", port, ctx.source("port"))
+    free(port)
+
+    // The host, which only the section names
+    showOne("host", ctx.getStr("host"), ctx.source("host"))
+
+    // Serving cannot fail here
+    return 0
+}
+
+/**
+ * runLogin
+ * Prints the credentials the required flag and the flag group let through
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runLogin(ctx: *Context) -> int32 {
+    // The required flag, which an environment variable satisfies as well as the line does
+    showOne("token", ctx.getStr("token"), ctx.source("token"))
+
+    // The two flags the group ties together, likewise
+    showOne("user", ctx.getStr("user"), ctx.source("user"))
+    showOne("pass", ctx.getStr("pass"), ctx.source("pass"))
+
+    // Logging in cannot fail here
+    return 0
+}
+
+/**
+ * showCmd
+ * Builds the show command, one flag of every kind the bindings can fill
+ * @return *Command - the show command
+ **/
+func showCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("show", "Print every flag with the source of its value")
+
+    // No positional arguments
+    c.setArgs(argsNone())
+
+    // One flag of each kind, all of them reachable as NOVA_<NAME>
+    c.localFlags().addStr("name", "n", "world", "who to greet")
+    c.localFlags().addInt("port", "p", 8080, "port to listen on")
+    c.localFlags().addFloat("rate", "", 1.0, "requests per second")
+    c.localFlags().addStrs("tags", "", "", "tags to attach")
+    c.localFlags().addChoice("emit", "e", "llvm", "llvm,obj", "what to emit")
+    c.localFlags().addCount("level", "l", "how loud to be")
+    c.localFlags().addBool("dry", "", false, "print instead of doing")
+
+    // One flag bound to a variable of its own, which the prefix has no say over
+    c.localFlags().addStr("label", "", "none", "label read from LABEL")
+    c.localFlags().bindEnv("label", "LABEL")
+
+    // The handler
+    c.setRun(runShow)
+
+    // Hand the finished command back to the caller
+    return c
+}
+
+/**
+ * serveCmd
+ * Builds the serve command, whose flags a config file can set from a section of its own
+ * @return *Command - the serve command
+ **/
+func serveCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("serve", "Print the flags a config file's serve section sets")
+
+    // No positional arguments
+    c.setArgs(argsNone())
+
+    // The two flags the section names
+    c.localFlags().addInt("port", "p", 8080, "port to listen on")
+    c.localFlags().addStr("host", "", "localhost", "host to bind")
+
+    // The handler
+    c.setRun(runServe)
+
+    // Hand the finished command back to the caller
+    return c
+}
+
+/**
+ * loginCmd
+ * Builds the login command, whose required flag and flag group an environment variable can satisfy
+ * @return *Command - the login command
+ **/
+func loginCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("login", "Show a required flag and a group filled from the environment")
+
+    // No positional arguments
+    c.setArgs(argsNone())
+
+    // The required flag, which NOVA_TOKEN satisfies as well as --token does
+    c.localFlags().addStr("token", "t", "", "the token to log in with")
+    c.localFlags().markRequired("token")
+
+    // The two flags that are set together or not at all
+    c.localFlags().addStr("user", "u", "", "the user name")
+    c.localFlags().addStr("pass", "", "", "the password")
+    c.markFlagsRequiredTogether("user,pass")
+
+    // The handler
+    c.setRun(runLogin)
+
+    // Hand the finished command back to the caller
+    return c
+}
+
+/**
+ * configCmd
+ * Builds the root command with the env prefix, the default config file and the flag that names another one
+ * @return *Command - the root command, ready for novaExecute
+ **/
+func configCmd() -> *Command {
+    // The root command, name and one line description
+    c: *Command = cmdNew("config", "Show what the environment and config file bindings do")
+
+    // The long description shown by config --help
+    c.setLong("config shows where the value of a flag came from.\n\nEvery flag reads NOVA_<NAME> when nothing on the line set it, and the file\n--config names, or nova-config.json when it is not given, fills in the rest.")
+
+    // The version, so the root grows a --version flag
+    c.setVersion("0.3.0")
+
+    // The prefix every environment variable of this tree is named after
+    c.setEnvPrefix("NOVA")
+
+    // The file read when no flag names one, which is not there so nothing is read
+    c.setConfigFile("nova-config.json")
+
+    // The flag whose value names a file instead, and the flag itself
+    c.setConfigFlag("config")
+    c.persistentFlags().addStr("config", "", "", "config file to read")
+
+    // One persistent flag every command below shows
+    c.persistentFlags().addBool("verbose", "v", false, "verbose output")
+
+    // The three commands under it
+    c.addCommand(showCmd())
+    c.addCommand(serveCmd())
+    c.addCommand(loginCmd())
+
+    // Hand the finished command back to the caller
+    return c
+}
+
+/**
+ * main
+ * Builds the command tree and hands the command line to nova
+ * @param argc {int32} - the argument count, unused here
+ * @param argv {string[]} - the raw command line, program name first
+ * @return int32 - the exit code novaExecute produced
+ **/
+func main(argc: int32, argv: string[]) -> int32 {
+    // The command tree, three commands under the root
+    root: *Command = configCmd()
+
+    // Parse argv against the tree, run the matching command and return its exit code
+    return novaExecute(root, argv)
+}

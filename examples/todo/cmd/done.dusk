@@ -2,14 +2,17 @@
 // required flag, and reports a bad id itself through ctx.fail.
 @paradigm procedural
 
-// The command type, the run context, the flag sets and the argument rules
+// The command type, the run context, the flag sets, the argument rules and the
+// completion directives
 @import nova.command
 @import nova.context
 @import nova.flagset
 @import nova.args
+@import nova.completion
 
-// parse_int
+// parse_int and the Vector the completion func hands back
 @import std.string
+@import std.vector
 
 /**
  * runDone
@@ -45,6 +48,25 @@ func runDone(ctx: *Context) -> int32 {
 }
 
 /**
+ * completeDoneIds
+ * Gives the ids completion offers for the item to mark done, each with the item text as its description
+ * @param ctx {*Context} - the run context nova builds for the completion request
+ * @param toComplete {string} - the text typed so far, which the shell filters on itself
+ * @return *Vector<string> - the candidates, freed by nova, and the directive keeping file names out of the list
+ **/
+func completeDoneIds(ctx: *Context, toComplete: string) -> (*Vector<string>, int64) {
+    // The candidate vector, which nova frees once it has printed it
+    out: *Vector<string> = alloc(vec_new())
+
+    // The two outstanding items, the id and a tab and the text
+    vec_push(out, "1\tbuy milk")
+    vec_push(out, "2\twrite nova")
+
+    // Hand them back with file name completion turned off
+    return (out, compNoFileComp())
+}
+
+/**
  * doneCmd
  * Builds the done command, one positional id plus a required --by flag
  * @return *Command - the done subcommand
@@ -64,6 +86,9 @@ export func doneCmd() -> *Command {
 
     // nova rejects the run itself when --by is missing
     c.localFlags().markRequired("by")
+
+    // What the shells offer for the positional id
+    c.setValidArgsFunc(completeDoneIds)
 
     // Hand the finished command back to the caller
     return c

@@ -1,0 +1,2 @@
+Error: config examples/config/wrong-type.json: invalid value for "--port": expected an integer
+Run 'config show --help' for usage.

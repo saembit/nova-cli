@@ -8,13 +8,25 @@
 #   tests/run.sh --update --force  overwrite expected files that already exist
 #   tests/run.sh --no-build      skip the build step, the binaries must exist
 #
-# tests/unit/<name>_test.dusk with a matching .expected file is run too.
+# tests/unit/<name>_test.dusk with a matching .expected file is run too, the
+# recorded stdout of every "<app> completion bash" case is checked with bash -n
+# (and zsh -n where a zsh case exists and zsh is installed, fish is skipped), and
+# tests/complete.sh sources the generated bash scripts and drives them.
 #
 # A case is a directory tests/cases/<name>/ holding:
-#   cmd      required, one line, "<app> <args...>" split on spaces with no quoting
+#   cmd      required, one line, "<app> <args...>" split on spaces with no quoting,
+#            a bare "" standing for an empty argument the shell would have quoted.
+#            The line may start with any number of VAR=value assignments before the
+#            app name; they are applied to that run with env and to nothing else,
+#            which is how a case exercises the environment bindings
+#            ("NOVA_NAME=fromenv config show").
 #   stdout   required outside --update, the exact expected stdout
 #   stderr   optional, the exact expected stderr, not compared when absent
 #   code     optional, the expected exit status, 0 when absent
+#
+# Every case runs with the repository root as its working directory, so a path
+# written in a cmd line ("--config examples/config/good.json") means the same
+# thing wherever run.sh itself was called from.
 #
 set -uo pipefail
 
@@ -110,6 +122,24 @@ for casedir in "$cases"/*/; do
         skipped=$((skipped + 1))
         continue
     fi
+    # A bare "" stands for an empty argument, which read leaves as two quote characters
+    for i in "${!argv[@]}"; do
+        if [ "${argv[$i]}" = '""' ]; then
+            argv[$i]=""
+        fi
+    done
+    # Leading VAR=value tokens set the environment of this run and are not arguments
+    envs=()
+    while [ "${#argv[@]}" -gt 0 ] && [[ "${argv[0]}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; do
+        envs+=("${argv[0]}")
+        argv=("${argv[@]:1}")
+    done
+    if [ "${#argv[@]}" -eq 0 ]; then
+        echo "${yellow}SKIP${off} $name (no app named)"
+        skipped=$((skipped + 1))
+        continue
+    fi
+
     app="${argv[0]}"
     args=("${argv[@]:1}")
     bin="${bin_of[$app]:-}"
@@ -120,7 +150,7 @@ for casedir in "$cases"/*/; do
         continue
     fi
 
-    "$bin" ${args[@]+"${args[@]}"} >"$tmp/out" 2>"$tmp/err"
+    (cd "$root" && env ${envs[@]+"${envs[@]}"} "$bin" ${args[@]+"${args[@]}"}) >"$tmp/out" 2>"$tmp/err"
     got_code=$?
 
     # --update fills in whatever the case is missing
@@ -176,6 +206,63 @@ for casedir in "$cases"/*/; do
         failed_names+=("$name")
     fi
 done
+
+# ---------------------------------------------------------------- shell syntax
+#
+# A generated completion script is a golden like any other, so the shell it is
+# written for parses its recorded stdout: bash -n for a "completion bash" case,
+# zsh -n for a "completion zsh" case when zsh is installed, and nothing for fish
+# since a fish script is not parsed by a flag.
+
+for casedir in "$cases"/*/; do
+    [ -d "$casedir" ] || continue
+    name="syntax-$(basename "$casedir")"
+    if [ -n "$filter" ] && [[ "$name" != *"$filter"* ]]; then
+        continue
+    fi
+    [ -f "$casedir/cmd" ] || continue
+    [ -f "$casedir/stdout" ] || continue
+
+    IFS= read -r line < "$casedir/cmd"
+    shell=""
+    case "$line" in
+        *" completion bash"*) shell="bash" ;;
+        *" completion zsh"*)  shell="zsh" ;;
+        *)                    continue ;;
+    esac
+
+    if ! command -v "$shell" > /dev/null 2>&1; then
+        echo "${yellow}SKIP${off} $name ($shell is not installed)"
+        skipped=$((skipped + 1))
+        continue
+    fi
+
+    if d="$("$shell" -n "$casedir/stdout" 2>&1)"; then
+        echo "${green}PASS${off} $name"
+        pass=$((pass + 1))
+    else
+        echo "${red}FAIL${off} $name"
+        printf '%s\n' "$d" | sed 's/^/    /'
+        fail=$((fail + 1)); failed_names+=("$name")
+    fi
+done
+
+# ---------------------------------------------------------------- completion drive
+#
+# tests/complete.sh sources the generated bash scripts and calls the completion
+# functions with COMP_WORDS set, so the scripts are checked by running as well as
+# by parsing. It needs the example binaries, which the build step above made.
+
+if [ -z "$filter" ] || [[ "complete" == *"$filter"* ]]; then
+    if out="$(bash "$here/complete.sh" 2>&1)"; then
+        echo "${green}PASS${off} complete-drive"
+        pass=$((pass + 1))
+    else
+        echo "${red}FAIL${off} complete-drive"
+        printf '%s\n' "$out" | sed 's/^/    /'
+        fail=$((fail + 1)); failed_names+=("complete-drive")
+    fi
+fi
 
 # ---------------------------------------------------------------- unit tests
 #

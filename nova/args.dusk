@@ -6,6 +6,7 @@
 @paradigm procedural
 
 @import std.string
+@import text
 
 /**
  * ArgsKind
@@ -136,7 +137,7 @@ export func argsValidateFirst(spec: ArgSpec, n: int64, first: string, cmdPath: s
         ArgsNone => {
             // Any argument at all is an unknown command
             if n > 0 {
-                return error { message: "unknown command \"" + first + "\" for \"" + cmdPath + "\"" }
+                return error { message: textCat5("unknown command \"", first, "\" for \"", cmdPath, "\"") }
             }
             return error {}
         },

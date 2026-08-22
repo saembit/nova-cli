@@ -8,12 +8,23 @@
 // freed along with everything else.
 // Each argv is a fixed array minted as collector<string[]> for the same reason exec_test
 // does it, novaExecute stores argv in a heap Context handed to opaque handlers.
+//
+// The second half reads the runtime's live block registry through
+// cool_gen_registry_snapshot before and after a call, so every line of the "## per call
+// leak" block is how many blocks that one call left behind. Every one of them is 0 except
+// the run that parses a config file, which is 1: std.json's json_parse allocates its
+// JParser and never frees it, one block per call, and nothing outside std.json can reach
+// it. The reading is taken on the third run of each line because the first one grows the
+// tree with the builtin commands, which belong to it until novaFreeTree.
 @paradigm oop
 @paradigm procedural
 
 // Stdlib pieces the tree leans on
 @import std.string
 @import std.vector
+
+// The file and environment helpers the leak readings lean on
+@import std.fs
 
 // The library, the free walk and everything executing touches
 @import nova.command
@@ -24,6 +35,13 @@
 @import nova.text
 @import nova.exec
 @import nova.freetree
+@import nova.sink
+
+// The runtime's live block registry and setenv, neither of which dusk itself wraps
+foreign "C" {
+    func cool_gen_registry_snapshot(ptrs: *raw char, sizes: *raw char) -> int64
+    func setenv(name: *raw char, value: *raw char, overwrite: int32) -> int32
+}
 
 /**
  * rootPpre
@@ -123,6 +141,221 @@ func buildRoot() -> *Command {
 }
 
 /**
+ * live
+ * Gives the number of blocks the runtime has handed out and not taken back, the two buffers the snapshot fills being freed again and discounted so the reading is of everything else
+ * @return the live block count
+ **/
+func live() -> int64 {
+    // The two out parameters cool_gen_registry_snapshot writes its arrays into
+    a: *raw char = alloc_bytes(8)
+    b: *raw char = alloc_bytes(8)
+
+    // The count, taken while the two buffers are themselves live
+    n: int64 = cool_gen_registry_snapshot(a, b)
+
+    // Free the buffers and take them back out of the count
+    free(a)
+    free(b)
+    return n - 2
+}
+
+/**
+ * envSet
+ * Sets one environment variable for the rest of this process, which dusk itself has no way to do
+ * @param name {string} - the variable name
+ * @param value {string} - the value it takes, "" counting as unset everywhere nova reads it
+ * @return void
+ **/
+func envSet(name: string, value: string) -> void {
+    // The two C strings setenv wants
+    n: *raw char = cbuf(name)
+    v: *raw char = cbuf(value)
+
+    // Set it, overwriting whatever the caller's environment held
+    rc: int32 = setenv(n, v, 1)
+
+    // Anything but 0 means the variable is not there and the reading below would drift
+    if rc != 0 {
+        println("setenv failed for {}", name)
+    }
+
+    // Free the two buffers
+    free(n)
+    free(v)
+}
+
+/**
+ * showLeak
+ * Runs one command line three times and prints how many blocks the last run left behind
+ * @param label {string} - the name the line is reported under
+ * @param root {*Command} - the tree to run it against
+ * @param argv {string[]} - the line, program name first
+ * @return void
+ **/
+func showLeak(label: string, root: *Command, argv: string[]) -> void {
+    // The difference the last of the three runs made
+    mut d: int64 = 0
+
+    // The first run is the one that grows the tree with the builtin commands, which live in it until novaFreeTree, so only a later one is a reading
+    mut i: int64 = 0
+    while i < 3 {
+        b0: int64 = live()
+        novaExecute(root, argv)
+        d = live() - b0
+        i = i + 1
+    }
+
+    // One line per case, the number that has to be zero
+    println("{}: {}", label, d)
+}
+
+/**
+ * leakOk
+ * The handler of every command the leak tree runs, which prints nothing so the reading is of nova alone
+ * @param ctx {*Context} - the run context, unused
+ * @return int32 - 0
+ **/
+func leakOk(ctx: *Context) -> int32 {
+    // Nothing to do
+    return 0
+}
+
+/**
+ * leakDeny
+ * The error returning handler, whose message is a literal so nothing about it is nova's to free
+ * @param ctx {*Context} - the run context, unused
+ * @return error - always a refusal
+ **/
+func leakDeny(ctx: *Context) -> error {
+    // Refuse every run
+    return error { message: "the handler said no" }
+}
+
+/**
+ * buildLeakRoot
+ * Builds the tree the per call readings are taken on, everything nova prints going into buf so the readings are not buried in output
+ * @param buf {*StringBuilder} - the buffer both sinks write to
+ * @return *Command - the root of the tree
+ **/
+func buildLeakRoot(buf: *StringBuilder) -> *Command {
+    // The root, whose version gives it a --version flag and whose children give it the builtins
+    root: *Command = cmdNew("leak", "Measure what one call leaves behind")
+    root.setVersion("0.3.0")
+    root.setOut(Sink.Buffer(buf))
+    root.setErr(Sink.Buffer(buf))
+
+    // The bindings, a prefix and the flag that names a config file
+    root.setEnvPrefix("LEAK")
+    root.setConfigFlag("config")
+    root.persistentFlags().addStr("config", "", "", "config file")
+    root.persistentFlags().addBool("verbose", "v", false, "verbose output")
+
+    // go carries a required flag, a group and an argument rule, so every error path has a home
+    go: *Command = cmdNew("go", "Every error path")
+    go.setArgs(argsNone())
+    go.localFlags().addStr("need", "", "", "a required flag")
+    go.localFlags().markRequired("need")
+    go.localFlags().addStr("name", "n", "", "a string the file can fill")
+    go.localFlags().addInt("port", "p", 0, "an int the file can fill")
+    go.localFlags().addBool("a", "", false, "one of a pair")
+    go.localFlags().addBool("b", "", false, "the other of the pair")
+    go.markFlagsMutuallyExclusive("a,b")
+    go.setRun(leakOk)
+    root.addCommand(go)
+
+    // boom hands an error back rather than an exit code
+    boom: *Command = cmdNew("boom", "Refuse the run")
+    boom.setRunE(leakDeny)
+    root.addCommand(boom)
+
+    // Hand the tree back
+    return root
+}
+
+/**
+ * measureLeaks
+ * Prints the block count every kind of run leaves behind, which is zero for all of them but the one that parses a config file
+ * @return void
+ **/
+func measureLeaks() -> void {
+    // Everything the library prints goes here rather than to the terminal
+    buf: *StringBuilder = alloc(sb_new())
+
+    // A root with no children at all, which grows no builtins
+    bare: *Command = cmdNew("bare", "Nothing under it")
+    bare.setOut(Sink.Buffer(buf))
+    bare.setErr(Sink.Buffer(buf))
+    bare.setRun(leakOk)
+    p1: string[1] = ["bare"]
+    showLeak("bare root", bare, collector<string[]>(p1[0..p1.len]))
+    novaFreeTree(bare)
+
+    // The tree every other reading is taken on
+    root: *Command = buildLeakRoot(buf)
+
+    // A run that succeeds, then the two lines that print instead of running
+    p2: string[4] = ["leak", "go", "--need", "x"]
+    showLeak("tree with kids", root, collector<string[]>(p2[0..p2.len]))
+    p3: string[2] = ["leak", "--help"]
+    showLeak("--help", root, collector<string[]>(p3[0..p3.len]))
+    p4: string[2] = ["leak", "--version"]
+    showLeak("--version", root, collector<string[]>(p4[0..p4.len]))
+
+    // Every error path, each of which builds a message the tree takes over
+    p5: string[3] = ["leak", "go", "--bogus"]
+    showLeak("flag error", root, collector<string[]>(p5[0..p5.len]))
+    p6: string[2] = ["leak", "nosuch"]
+    showLeak("unknown command", root, collector<string[]>(p6[0..p6.len]))
+    p7: string[2] = ["leak", "go"]
+    showLeak("required error", root, collector<string[]>(p7[0..p7.len]))
+    p8: string[6] = ["leak", "go", "--need", "x", "--a", "--b"]
+    showLeak("group error", root, collector<string[]>(p8[0..p8.len]))
+    p9: string[5] = ["leak", "go", "--need", "x", "extra"]
+    showLeak("args error", root, collector<string[]>(p9[0..p9.len]))
+    p10: string[2] = ["leak", "boom"]
+    showLeak("RunE error", root, collector<string[]>(p10[0..p10.len]))
+
+    // The two completion paths, the script and the callback the script makes
+    p11: string[3] = ["leak", "completion", "bash"]
+    showLeak("completion bash", root, collector<string[]>(p11[0..p11.len]))
+    p12: string[3] = ["leak", "__complete", ""]
+    showLeak("__complete empty", root, collector<string[]>(p12[0..p12.len]))
+
+    // A run the environment fills in
+    envSet("LEAK_NAME", "fromenv")
+    envSet("LEAK_NEED", "fromenv")
+    showLeak("env run", root, collector<string[]>(p7[0..p7.len]))
+
+    // The same run with a config file under it, whose one block is the parser std.json leaks per json_parse and not nova's to free
+    cfgPath: string = "free_test_config.json"
+    we: error = write_file(cfgPath, "{ \"port\": 3000, \"go\": { \"port\": 42 } }")
+    if we.exists() {
+        println("write_file failed: {}", we.message)
+    }
+    p13: string[4] = ["leak", "go", "--config", cfgPath]
+    showLeak("config+env run", root, collector<string[]>(p13[0..p13.len]))
+
+    // Put the environment and the working directory back
+    envSet("LEAK_NAME", "")
+    envSet("LEAK_NEED", "")
+    re: error = remove_file(cfgPath)
+    if re.exists() {
+        println("remove_file failed: {}", re.message)
+    }
+
+    // The tree and the buffer are done with
+    novaFreeTree(root)
+    sb_free(buf)
+    free(buf)
+
+    // The reading a whole tree leaves behind once it is freed again, which is what novaFreeTree is for
+    b0: int64 = live()
+    again: *Command = buildLeakRoot(buf)
+    novaFreeTree(again)
+    println("build and free a tree: {}", live() - b0)
+}
+
+/**
  * main
  * Executes a tree twice, frees it, then frees a tree that never ran and a bare root
  * @param argc {int32} - unused
@@ -169,6 +402,10 @@ func main(argc: int32, argv: string[]) -> int32 {
     bare: *Command = cmdNew("bare", "Nothing on it")
     novaFreeTree(bare)
     println("freed ok: bare root")
+
+    // What one call leaves behind, which is zero on every path nova owns
+    println("## per call leak")
+    measureLeaks()
 
     // Done
     return 0

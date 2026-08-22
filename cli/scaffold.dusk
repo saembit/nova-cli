@@ -9,8 +9,8 @@
  *
  * Three things are shelled out, symlink creation since std.fs binds no symlink, resolving a
  * symlink target with readlink -f on /proc/<pid>/exe to find the library beside the running
- * binary, and dawn get, which operates on the project it is run inside and so has to be
- * reached through a cd. Every argument goes through std.os quote first. Directory creation
+ * binary, dawn get, which operates on the project it is run inside and so has to be reached
+ * through a cd, and git config user.name, which names the holder of a generated LICENSE. Every argument goes through std.os quote first. Directory creation
  * is make_dir applied to each path prefix in turn, so scaffoldMkdir is a real mkdir -p with
  * no shell.
  *
@@ -463,6 +463,38 @@ export func scaffoldDawnGet(dir: string) -> (string, bool) {
 
     // The output paired with whether the fetch worked
     return (out, code == 0)
+}
+
+/**
+ * scaffoldGitUserName
+ * Reads git config user.name, which is who a generated LICENSE names when --author is absent
+ * @return the name paired with true, or "" paired with false when git is absent or unset
+ **/
+export func scaffoldGitUserName() -> (string, bool) {
+    // Ask git for the one setting, where an unset name exits non-zero
+    out, code, e := run_capture("git config user.name")
+
+    // A git that could not be run answers nothing
+    if e.exists() {
+        e.ignore()
+        return ("", false)
+    }
+
+    // A non-zero status means the setting is not there
+    if code != 0 {
+        return ("", false)
+    }
+
+    // The name git printed, without its newline
+    name: string = trim(out)
+
+    // An empty name is no answer either
+    if str_len(name) == 0 {
+        return ("", false)
+    }
+
+    // The configured name
+    return (name, true)
 }
 
 /**

@@ -1,0 +1,6 @@
+--help	help for todo
+-h	help for todo
+--verbose	verbose output
+-v	verbose output
+--version	version for todo
+:4

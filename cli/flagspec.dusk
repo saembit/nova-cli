@@ -1,0 +1,464 @@
+/**
+ * cli/flagspec.dusk
+ * The --flags spec nova-cli add takes, parsed into one FlagSpec per declared flag
+ *
+ * std only, no @import nova.*, so dusk check cli/flagspec.dusk type-checks it on its own the
+ * way scaffold.dusk and templates.dusk do. The grammar is a comma separated list of
+ * name[/s]:kind[=default], kind being one of bool, string, int, float, strs, count and
+ * choice[a|b|c]:
+ *
+ *     port/p:int=8080,tag/t:strs=a|b,emit:choice[llvm|obj]=obj,verbose/v:count
+ *
+ * A choice carries its alternatives inside the kind, separated by bars rather than commas so
+ * the entries still split on commas, and a strs default is written with bars for the same
+ * reason and turned into the comma list addStrs wants. Every part is checked before anything
+ * is generated, since each of them is spliced straight into a dusk string literal or an
+ * identifier, so a quote, a backslash, or a control character is refused wherever it appears.
+ *
+ * An int and a float default reach the generated file as the literal their parsed value
+ * prints back as rather than as the text that was typed, since dusk knows no 1e5 and no +5,
+ * and a nan or an infinity is refused outright for having no literal at all. Two names that
+ * sanitize to the same identifier, such as a-b and a_b, are refused the same way a repeated
+ * name is, since the generated handler would declare their local twice.
+ *
+ * Every export carries the spec prefix, except the two types the templates match on.
+ **/
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+
+@import scaffold
+
+/**
+ * SpecKind
+ * The seven flag kinds a spec can name, one per addX method on a FlagSet
+ **/
+export enum SpecKind { SBool, SStr, SInt, SFloat, SStrs, SCount, SChoice }
+
+/**
+ * FlagSpec
+ * One flag a generated command declares, every string already checked and normalized
+ **/
+export struct FlagSpec {
+    name: string,
+    short: string,
+    kind: SpecKind,
+    def: string,
+    choices: string,
+}
+
+/**
+ * specValidValue
+ * Whether a default is safe to splice into a generated dusk string literal
+ * @param v {string} - the default as the user typed it, possibly empty
+ * @return true when it holds no quote, backslash, or control character
+ **/
+func specValidValue(v: string) -> bool {
+    // Length of the value
+    n: int64 = str_len(v)
+
+    // Whether every character seen so far is allowed
+    mut ok: bool = true
+    // Cursor over the value
+    mut i: int64 = 0
+
+    // Loop rejecting control characters, quotes, and backslashes, spaces being fine
+    while i < n {
+        // The current character
+        c: char = v[i]
+        if c < 32 || c == 34 || c == 92 || c == 127 {
+            ok = false
+        }
+        i = i + 1
+    }
+
+    // The verdict
+    return ok
+}
+
+/**
+ * specIsLetter
+ * Whether a character is an ASCII letter, which is all a shorthand may be
+ * @param c {char} - the character
+ * @return true for A-Z and a-z
+ **/
+func specIsLetter(c: char) -> bool {
+    // The two ASCII letter ranges
+    return (c >= 97 && c <= 122) || (c >= 65 && c <= 90)
+}
+
+/**
+ * specSplitFirst
+ * Splits a string at the first occurrence of a separator
+ * @param s {string} - the text to split
+ * @param sep {string} - the separator to look for
+ * @return the part before it, the part after it, and whether it was there
+ **/
+func specSplitFirst(s: string, sep: string) -> (string, string, bool) {
+    // Where the separator sits, or -1
+    i: int64 = str_find(s, sep)
+
+    // No separator leaves the whole string on the left
+    if i < 0 {
+        return (s, "", false)
+    }
+
+    // The two halves, neither carrying the separator
+    return (substring(s, 0, i), substring(s, i + str_len(sep), str_len(s)), true)
+}
+
+/**
+ * specIntDefault
+ * The integer literal a default becomes, printed back out of the value parse_int read
+ * @param v {string} - the default text
+ * @return the literal paired with the reason it was refused, one of the two being empty
+ **/
+func specIntDefault(v: string) -> (string, string) {
+    // Parse it, since a default that is no integer would reach addInt as one
+    n, e := parse_int(v)
+    if e.exists() {
+        e.ignore()
+        return ("", "default \"" + v + "\" is not an integer")
+    }
+
+    // The value printed back, so a +5 the user typed lands in the file as the 5 dusk parses
+    return (int_to_string(n), "")
+}
+
+/**
+ * specFloatDefault
+ * The float64 literal a default becomes, printed back out of the value parse_float read
+ * @param v {string} - the default text
+ * @return the literal paired with the reason it was refused, one of the two being empty
+ **/
+func specFloatDefault(v: string) -> (string, string) {
+    // Parse it, since dusk reads 1 as an integer and knows no 1e5 literal at all
+    x, e := parse_float(v)
+    if e.exists() {
+        e.ignore()
+        return ("", "default \"" + v + "\" is not a number")
+    }
+
+    // A nan is the one value that is not itself, and an infinity is the one whose difference
+    // with itself is not zero, and neither of them is a literal dusk can spell
+    if x != x || x - x != 0.0 {
+        return ("", "default \"" + v + "\" is not a finite number")
+    }
+
+    // The value the way dusk itself prints one
+    s: string = f"{x}"
+
+    // Outside the range that prints without an exponent there is no literal dusk parses
+    if str_contains(s, "e") || str_contains(s, "E") {
+        free(s)
+        return ("", "default \"" + v + "\" is too large or too small to write as a float")
+    }
+
+    // A rendering carrying a point is a float literal as it stands
+    if str_contains(s, ".") {
+        return (s, "")
+    }
+
+    // Anything else gains the fraction that makes it one
+    out: string = s + ".0"
+    free(s)
+    return (out, "")
+}
+
+/**
+ * specParseChoices
+ * Reads the alternatives out of a choice[a|b|c] kind
+ * @param kindPart {string} - the kind text, starting with "choice"
+ * @return the alternatives comma joined for addChoice, and the reason it was refused
+ **/
+func specParseChoices(kindPart: string) -> (string, string) {
+    // The alternatives have to be bracketed
+    if !starts_with(kindPart, "choice[") || !ends_with(kindPart, "]") {
+        return ("", "expected choice[a|b|c]")
+    }
+
+    // What sits between the brackets
+    inner: string = substring(kindPart, 7, str_len(kindPart) - 1)
+
+    // An empty list would leave addChoice nothing to accept
+    if str_len(inner) == 0 {
+        return ("", "choice needs at least one alternative")
+    }
+
+    // The alternatives, which are bar separated so the entry still splits on commas
+    alts: *Vector<string> = str_split(inner, "|")
+
+    // The reason one of them was refused
+    mut why: string = ""
+
+    // Cursor over the alternatives
+    mut i: int64 = 0
+
+    // Loop checking each alternative is a plain word
+    while i < vec_len(alts) {
+        // The current alternative
+        a: string = vec_get(alts, i)
+        if str_len(a) == 0 {
+            why = "empty choice alternative"
+        } else if !scaffoldValidToken(a) || str_contains(a, ",") {
+            why = "invalid choice alternative \"" + a + "\""
+        }
+        i = i + 1
+    }
+
+    // A bad alternative refuses the whole entry
+    if str_len(why) > 0 {
+        return ("", why)
+    }
+
+    // The alternatives in the comma separated form addChoice takes
+    joined: string = str_join(alts, ",")
+    return (joined, "")
+}
+
+/**
+ * specParseEntry
+ * Parses one name[/s]:kind[=default] entry into a FlagSpec
+ * @param entry {string} - the entry text, already trimmed
+ * @return the parsed flag paired with the reason it was refused, one of the two being empty
+ **/
+func specParseEntry(entry: string) -> (*FlagSpec, string) {
+    // The placeholder handed back with every refusal, since dusk has no null pointer
+    empty: *FlagSpec = alloc(FlagSpec { name: "", short: "", kind: SpecKind.SBool, def: "", choices: "" })
+
+    // An entry has to hold something
+    if str_len(entry) == 0 {
+        return (empty, "empty entry")
+    }
+
+    // The name side and the kind side
+    namePart, rest, hasColon := specSplitFirst(entry, ":")
+    if !hasColon {
+        return (empty, "expected name:kind")
+    }
+
+    // The name and its shorthand, which is the half after the slash
+    name, short, hasShort := specSplitFirst(namePart, "/")
+
+    // The name is spliced into a string literal and read back by the handler
+    if !scaffoldValidName(name) {
+        return (empty, "invalid flag name \"" + name + "\"")
+    }
+
+    // A shorthand is exactly one letter, the whole of what nova prints after a dash
+    if hasShort && (str_len(short) != 1 || !specIsLetter(short[0])) {
+        return (empty, "shorthand must be one letter")
+    }
+
+    // The kind and the default, which is the half after the first equals
+    kindPart, defText, hasDef := specSplitFirst(rest, "=")
+
+    // A default reaches a string literal too, so it is checked the same way
+    if hasDef && !specValidValue(defText) {
+        return (empty, "a default holds no quote, backslash, or control character")
+    }
+
+    // A bool default is one of the two words dusk spells
+    if str_eq(kindPart, "bool") {
+        if hasDef && !str_eq(defText, "true") && !str_eq(defText, "false") {
+            return (empty, "default \"" + defText + "\" is not true or false")
+        }
+        def: string = if hasDef { defText } else { "false" }
+        return (alloc(FlagSpec { name: name, short: short, kind: SpecKind.SBool, def: def, choices: "" }), "")
+    }
+
+    // A string default is whatever it says
+    if str_eq(kindPart, "string") {
+        return (alloc(FlagSpec { name: name, short: short, kind: SpecKind.SStr, def: defText, choices: "" }), "")
+    }
+
+    // An int default is the literal the value it parses to prints back as
+    if str_eq(kindPart, "int") {
+        // The literal spliced into the addInt call, zero when the entry named no default
+        mut def: string = "0"
+        if hasDef {
+            lit, why := specIntDefault(defText)
+            if str_len(why) > 0 {
+                return (empty, why)
+            }
+            def = lit
+        }
+        return (alloc(FlagSpec { name: name, short: short, kind: SpecKind.SInt, def: def, choices: "" }), "")
+    }
+
+    // A float default is the same, a literal dusk parses rather than the text the user typed
+    if str_eq(kindPart, "float") {
+        // The literal spliced into the addFloat call, zero when the entry named no default
+        mut def: string = "0.0"
+        if hasDef {
+            lit, why := specFloatDefault(defText)
+            if str_len(why) > 0 {
+                return (empty, why)
+            }
+            def = lit
+        }
+        return (alloc(FlagSpec { name: name, short: short, kind: SpecKind.SFloat, def: def, choices: "" }), "")
+    }
+
+    // A strs default is written with bars and handed to addStrs with commas
+    if str_eq(kindPart, "strs") {
+        def: string = replace_all(defText, "|", ",")
+        return (alloc(FlagSpec { name: name, short: short, kind: SpecKind.SStrs, def: def, choices: "" }), "")
+    }
+
+    // A count starts at zero and addCount takes no default at all
+    if str_eq(kindPart, "count") {
+        if hasDef {
+            return (empty, "count takes no default")
+        }
+        return (alloc(FlagSpec { name: name, short: short, kind: SpecKind.SCount, def: "", choices: "" }), "")
+    }
+
+    // A choice carries its alternatives and defaults to the first of them
+    if starts_with(kindPart, "choice") {
+        choices, why := specParseChoices(kindPart)
+        if str_len(why) > 0 {
+            return (empty, why)
+        }
+
+        // The alternatives back apart, so the default can be checked against them
+        alts: *Vector<string> = str_split(choices, ",")
+        def: string = if hasDef { defText } else { vec_get(alts, 0) }
+
+        // A default outside the alternatives would abort the generated program at startup
+        if !vec_contains(alts, def) {
+            return (empty, "default \"" + def + "\" is not one of the choices")
+        }
+        return (alloc(FlagSpec { name: name, short: short, kind: SpecKind.SChoice, def: def, choices: choices }), "")
+    }
+
+    // Anything else names no kind nova has
+    return (empty, "unknown kind \"" + kindPart + "\"")
+}
+
+/**
+ * specKindIsStrs
+ * Whether a parsed flag is the string slice kind, the one whose local needs a type and a join
+ * @param f {*FlagSpec} - the parsed flag
+ * @return true for a strs flag
+ **/
+export func specKindIsStrs(f: *FlagSpec) -> bool {
+    // Enums carry no equality, so the test is a match with one interesting arm
+    match (*f).kind {
+        SStrs => return true,
+        SBool => return false,
+        SStr => return false,
+        SInt => return false,
+        SFloat => return false,
+        SCount => return false,
+        SChoice => return false,
+    }
+    return false
+}
+
+/**
+ * specParse
+ * Parses a whole --flags spec into one FlagSpec per flag
+ * @param spec {string} - the comma separated spec as the user typed it
+ * @return the flags in declaration order paired with an error naming the entry that was refused
+ **/
+export func specParse(spec: string) -> (*Vector<*FlagSpec>, error) {
+    // The flags parsed so far
+    out: *Vector<*FlagSpec> = alloc(vec_new())
+
+    // An empty spec declares nothing, which is the shape add had before --flags
+    if str_len(trim(spec)) == 0 {
+        return (out, error {})
+    }
+
+    // The entries, one per flag
+    entries: *Vector<string> = str_split(spec, ",")
+
+    // The names claimed, since a duplicate would abort the generated program at startup
+    taken: *Vector<string> = alloc(vec_new())
+    // The identifiers claimed, since two names that sanitize alike share one generated local
+    idents: *Vector<string> = alloc(vec_new())
+    // The shorthands claimed, for the same reason the names are
+    shorts: *Vector<string> = alloc(vec_new())
+
+    // The failure that stopped the parse
+    mut failure: error = error {}
+    // Whether one happened
+    mut failed: bool = false
+    // Cursor over the entries
+    mut i: int64 = 0
+
+    // Loop parsing each entry, stopping at the first one that is refused
+    while i < vec_len(entries) && !failed {
+        // The current entry without the spaces a reader may have left around it
+        entry: string = trim(vec_get(entries, i))
+
+        // What it parses to, and why it did not
+        f, why := specParseEntry(entry)
+
+        // The reason it was refused, reported against the entry it came from
+        if str_len(why) > 0 {
+            failure = error { message: "invalid flag spec \"" + entry + "\": " + why }
+            failed = true
+        } else {
+            // The identifier the generated local is named after, which a-b and a_b both are
+            id: string = scaffoldIdent((*f).name)
+
+            // Whether the flag was kept, which is what decides who owns that identifier
+            mut kept: bool = false
+
+            // The three names a flag has to claim before it is written out
+            if vec_contains(taken, (*f).name) {
+                failure = error { message: "invalid flag spec \"" + entry + "\": duplicate flag name \"" + (*f).name + "\"" }
+                failed = true
+            } else if vec_contains(idents, id) {
+                // The name that claimed the identifier first, which sits at the same index
+                prior: string = vec_get(taken, vec_index_of(idents, id))
+                failure = error { message: "invalid flag spec \"" + entry + "\": duplicate flag name \"" + (*f).name + "\", which shares the local " + id + " with \"" + prior + "\"" }
+                failed = true
+            } else if str_len((*f).short) > 0 && vec_contains(shorts, (*f).short) {
+                failure = error { message: "invalid flag spec \"" + entry + "\": duplicate shorthand \"" + (*f).short + "\"" }
+                failed = true
+            } else {
+                // Claim the name, the identifier and the shorthand, then keep the flag
+                vec_push(taken, (*f).name)
+                vec_push(idents, id)
+                if str_len((*f).short) > 0 {
+                    vec_push(shorts, (*f).short)
+                }
+                vec_push(out, f)
+                kept = true
+            }
+
+            // A refused entry leaves the identifier to this loop to free
+            if !kept {
+                free(id)
+            }
+        }
+        i = i + 1
+    }
+
+    // Free the identifiers, which were minted here rather than borrowed
+    mut k: int64 = 0
+    while k < vec_len(idents) {
+        // The identifier at the cursor, bound so the free has an owner to take
+        id: string = vec_get(idents, k)
+        free(id)
+        k = k + 1
+    }
+
+    // Free the three name lists, the entries and their vector
+    vec_free(taken)
+    free(taken)
+    vec_free(idents)
+    free(idents)
+    vec_free(shorts)
+    free(shorts)
+    vec_free(entries)
+    free(entries)
+
+    // The flags paired with whatever stopped the parse
+    return (out, failure)
+}

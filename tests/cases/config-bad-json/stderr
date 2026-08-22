@@ -1,0 +1,2 @@
+Error: config examples/config/bad.json: expected a string key in object
+Run 'config show --help' for usage.

@@ -2,6 +2,7 @@
  * nova/context.dusk
  * What a handler receives, a Context names the command that runs, the root, the chain of commands from the root down to it, the positional args left after flag parsing and the raw argv
  * Flag getters resolve a name against the command's local flags, then its persistent flags, then each ancestor's persistent flags nearest first, asking for a flag no command on the chain declares aborts with "fatal: nova: ..."
+ * changed() answers whether the command line set a flag while source() answers where its value came from at all, the line, the environment, a config file or the declaration
  **/
 @paradigm oop
 @paradigm procedural
@@ -307,6 +308,23 @@ impl Context {
     }
 
     /**
+     * source
+     * Gives where the value of name came from, the command line, the environment, a config file or the declaration itself
+     * @param name {string} - the long name
+     * @return the source
+     **/
+    func source(name: string) -> FlagSource {
+        // The chain
+        chain: *Vector<*Command> = self.chain
+
+        // The set that holds the flag
+        fset: *FlagSet = ctxRequire(chain, name)
+
+        // Return the source from the set
+        return fset.source(name)
+    }
+
+    /**
      * commandPath
      * Gives the full path of the running command, such as "app serve"
      * @return the path
@@ -445,14 +463,14 @@ export func ctxReportError(chain: *Vector<*Command>, target: *Command, msg: stri
 
     // Write the error line unless silenced
     if !(*target).silenceErrors {
-        line: string = "Error: " + msg + "\n"
+        line: string = textCat3("Error: ", msg, "\n")
         sinkWrite(errs, line)
         free(line)
     }
 
     // Write the usage hint unless silenced
     if !(*target).silenceUsage {
-        hint: string = "Run '" + (*target).path + " --help' for usage.\n"
+        hint: string = textCat3("Run '", (*target).path, " --help' for usage.\n")
         sinkWrite(errs, hint)
         free(hint)
     }

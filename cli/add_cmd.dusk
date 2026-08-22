@@ -14,6 +14,12 @@
  * c.addCommand(...) in the application, which is the very line this file writes. A module
  * called c_cmd collides with nothing, and a module and a function may share a name.
  *
+ * --flags declares the new command's flags along with it, one name[/s]:kind[=default] per
+ * comma separated entry, and the generated handler reads each of them back with the getter
+ * its kind takes and prints what it holds, so the command runs and shows its own values the
+ * moment the project is built. cli/flagspec.dusk parses the spec and refuses a bad one
+ * before anything is written.
+ *
  * add writes source and nothing else. Since dusk 1.14 a generated project reaches the
  * library through its manifest's @require nova, and alias resolution is manifest wide, so a
  * new file under cmd/ needs no path of its own to nova/. A --vendor project still needs the
@@ -35,6 +41,7 @@
 
 @import scaffold
 @import templates
+@import flagspec
 
 /**
  * addParentIdent
@@ -73,8 +80,9 @@ func addParentPath(dir: string, parent: string) -> string {
  * addRun
  * Writes the subcommand file and wires it into its parent, the add handler
  * @param ctx {*Context} - the running context
- * @return 0 on success, 2 when the file was written but its parent held no anchors, 1 with
- * an Error line on an illegal name, a missing parent, or a failed write
+ * @return 0 on success, 2 when the spec was refused or when the file was written but its
+ * parent held no anchors, 1 with an Error line on an illegal name, a missing parent, or a
+ * failed write
  **/
 func addRun(ctx: *Context) -> int32 {
     // The subcommand name as typed
@@ -83,6 +91,8 @@ func addRun(ctx: *Context) -> int32 {
     dir: string = ctx.getStr("dir")
     // The command the new one is hung off
     parent: string = ctx.getStr("parent")
+    // The flags the new command declares, empty for the plain template
+    spec: string = ctx.getStr("flags")
 
     // Both names are spliced into source and into paths, so both are checked first
     if !scaffoldValidName(name) {
@@ -90,6 +100,14 @@ func addRun(ctx: *Context) -> int32 {
     }
     if !scaffoldValidName(parent) {
         return ctx.fail("invalid command name \"" + parent + "\"")
+    }
+
+    // The spec parsed into one flag per entry, which is refused before anything is written
+    flags, se := specParse(spec)
+    if se.exists() {
+        // The reason, reported the Cobra way, with 2 telling a script it was the spec
+        ctx.fail(se.message)
+        return int32(2)
     }
 
     // The sanitized identifier the file and the constructor are named after
@@ -125,7 +143,7 @@ func addRun(ctx: *Context) -> int32 {
     }
 
     // Write the subcommand file, leaving an existing one alone
-    made, we := scaffoldWriteIfAbsent(path, tplSubCmd(name, parent))
+    made, we := scaffoldWriteIfAbsent(path, tplSubCmd(name, parent, flags))
     if we.exists() {
         return ctx.fail(we.message)
     }
@@ -167,18 +185,19 @@ export func addCmd() -> *Command {
     c: *Command = cmdNew("add <name>", "Add a subcommand to a nova application")
 
     // The long description shown by --help
-    c.setLong("Write cmd/<name>_cmd.dusk from the subcommand template and wire it into its parent's constructor.\nThe name must match [A-Za-z][A-Za-z0-9_-]* and is sanitized for the file name and the constructor only: \"my-cmd\" lands in cmd/my_cmd_cmd.dusk exporting my_cmdCmd() but is still typed as my-cmd.\nThe _cmd suffix keeps the module name a generated @import introduces from shadowing a variable of the same name anywhere in the application.")
+    c.setLong("Write cmd/<name>_cmd.dusk from the subcommand template and wire it into its parent's constructor.\nThe name must match [A-Za-z][A-Za-z0-9_-]* and is sanitized for the file name and the constructor only: \"my-cmd\" lands in cmd/my_cmd_cmd.dusk exporting my_cmdCmd() but is still typed as my-cmd.\nThe _cmd suffix keeps the module name a generated @import introduces from shadowing a variable of the same name anywhere in the application.\n--flags declares the command's flags with it: comma separated name[/s]:kind[=default] entries, kind being one of bool, string, int, float, strs, count, choice[a|b|c]. A strs default is written with bars, a choice defaults to its first alternative, and the generated handler prints every flag it reads.")
     // The examples shown under it
-    c.setExample("  nova-cli add serve\n  nova-cli add config --parent serve --dir myapp")
+    c.setExample("  nova-cli add serve\n  nova-cli add config --parent serve --dir myapp\n  nova-cli add serve --flags port/p:int=8080,tag/t:strs=a|b,emit:choice[llvm|obj]")
 
     // Exactly one positional, the name
     c.setArgs(argsExact(1))
     // The handler
     c.setRun(addRun)
 
-    // The two flags the handler reads
+    // The three flags the handler reads
     c.localFlags().addStr("parent", "p", "root", "parent command to wire the new command into")
     c.localFlags().addStr("dir", "d", ".", "project directory")
+    c.localFlags().addStr("flags", "f", "", "flags to declare, name[/s]:kind[=default] separated by commas")
 
     // Return the finished command
     return c

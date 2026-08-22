@@ -1,6 +1,6 @@
 /**
  * nova/freetree.dusk
- * novaFreeTree, frees a whole Command tree once the run is over, every node reachable from the root along with its vectors, its flag groups and both of its FlagSets, the strings are left alone since they are borrowed literals or argv, apart from the group names the groups own
+ * novaFreeTree, frees a whole Command tree once the run is over, every node reachable from the root along with its vectors, its flag groups and both of its FlagSets, the strings are left alone since they are borrowed literals or argv, apart from the group names, the name cmdNew cut out of the use line, the paths the executor built and the last error message, which the tree owns
  * The walk is a worklist taken from the back rather than recursion, a node is freed after its children are queued so no child is reached through a freed parent
  **/
 @paradigm oop
@@ -13,11 +13,29 @@
 
 /**
  * freetreeFields
- * Frees what one Command node owns, its aliases, validArgs, kids and groups vectors and both FlagSets, the node itself is left for its owner and the children must already be queued elsewhere since the kids vector goes too
+ * Frees what one Command node owns, its name, its path and last error message, its aliases, validArgs, kids, completion func and groups vectors and both FlagSets, the node itself is left for its owner and the children must already be queued elsewhere since the kids vector goes too
  * @param n {*Command} - the node whose fields to free
  * @return nothing
  **/
 func freetreeFields(n: *Command) -> void {
+    // Free the long description when the builtin that built it owns it
+    if (*n).longOwned {
+        free((*n).long)
+    }
+
+    // Free the path the executor built for this node, which only the root does not own
+    if (*n).pathOwned {
+        free((*n).path)
+    }
+
+    // Free the name cmdNew cut out of the use line, which the root's path also points at
+    free((*n).name)
+
+    // Free the message of the last error nova reported through this node
+    if (*n).hasErrMsg {
+        free((*n).errMsg)
+    }
+
     // Free the alias vector
     vec_free((*n).aliases)
     free((*n).aliases)
@@ -29,6 +47,22 @@ func freetreeFields(n: *Command) -> void {
     // Free the child vector, the children themselves are on the worklist
     vec_free((*n).kids)
     free((*n).kids)
+
+    // The flag completion func registry
+    comps: *Vector<*FlagCompFunc> = (*n).compFuncs
+
+    // Loop taking entries off the back, the name inside one is borrowed and stays
+    while vec_len(comps) > 0 {
+        // The last entry, now owned here
+        e: *FlagCompFunc = vec_take(comps, vec_len(comps) - 1)
+
+        // Free the entry
+        free(e)
+    }
+
+    // Free the registry vector
+    vec_free(comps)
+    free((*n).compFuncs)
 
     // Free the flags in the local set then the set
     lf: *FlagSet = (*n).flags

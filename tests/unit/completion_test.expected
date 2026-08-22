@@ -1,0 +1,57 @@
+## newline in a child short
+completion	Generate the autocompletion script for the specified shell
+help	Help about any command
+nl	line one
+sub	the sub
+:4
+## newline in a child short, no descriptions
+completion
+help
+nl
+sub
+:4
+## newline in a flag help
+--flag	a bool
+-f	a bool
+--help	help for sub
+-h	help for sub
+--mode	a mode
+-m	a mode
+--name	a name
+-n	a name
+--verbose	verbose
+-v	verbose
+:4
+## newline in a validArgsFunc candidate
+one
+two
+tc=
+:4
+## newline in a flag func candidate
+alice
+bob	the builder
+:4
+## -- ends the flags of the root
+completion	Generate the autocompletion script for the specified shell
+help	Help about any command
+nl	line one
+sub	the sub
+:4
+## -- ends the flags of a child
+one
+two
+tc=-
+:4
+## -- ends the flag values too
+one
+two
+tc=
+:4
+## -n=prefix completes the value
+-n=alice
+-n=bob	the builder
+:4
+## a cluster completes the value of its last letter
+alice
+bob	the builder
+:4

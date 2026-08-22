@@ -14,6 +14,7 @@
 @import sink
 @import command
 @import context
+@import config
 @import help
 @import completion
 @import parse
@@ -28,6 +29,16 @@ func execFixup(rootc: *Command) -> void {
     // Add the builtin completion command when it applies
     if !(*rootc).disableCompletionCmd && rootc.numChildren() > 0 && rootc.findChild("completion") < 0 {
         rootc.addCommand(completionCommandNew((*rootc).name))
+    }
+
+    // Add the hidden command the generated scripts call back into
+    if !(*rootc).disableCompletionCmd && rootc.numChildren() > 0 && rootc.findChild("__complete") < 0 {
+        rootc.addCommand(completionHiddenCommandNew(false))
+    }
+
+    // Add the hidden command the scripts that show no descriptions call instead
+    if !(*rootc).disableCompletionCmd && rootc.numChildren() > 0 && rootc.findChild("__completeNoDesc") < 0 {
+        rootc.addCommand(completionHiddenCommandNew(true))
     }
 
     // Add the root's --version flag when a version is declared
@@ -63,12 +74,42 @@ func execFixup(rootc: *Command) -> void {
         mut i: int64 = 0
         while i < vec_len(kids) {
             k: *Command = vec_get(kids, i)
-            (*k).path = (*c).path + " " + (*k).name
+
+            // Free the path the last call built before building this one
+            if (*k).pathOwned {
+                free((*k).path)
+            }
+
+            // The path is the parent's path and the child's name
+            (*k).path = textCat3((*c).path, " ", (*k).name)
+            (*k).pathOwned = true
             vec_push(work, k)
             i = i + 1
         }
         w = w + 1
     }
+
+    // Free the worklist, whose commands belong to the tree
+    vec_free(work)
+    free(work)
+}
+
+// Reports an error nova itself built against a command and takes its message over, freeing the one the last call left on the root so a run leaks nothing and the error handed back still reads
+func execFail(rootc: *Command, chain: *Vector<*Command>, target: *Command, e: error) -> (int32, error) {
+    // Report it the Cobra way through the err sink the chain resolves
+    code: int32 = ctxReportError(chain, target, e.message)
+
+    // Free the message the last call left behind
+    if (*rootc).hasErrMsg {
+        free((*rootc).errMsg)
+    }
+
+    // Keep this one in its place until the next call or novaFreeTree
+    (*rootc).errMsg = e.message
+    (*rootc).hasErrMsg = true
+
+    // Hand the exit code and the error back
+    return (code, e)
 }
 
 /**
@@ -106,9 +147,9 @@ func execCollectMissing(out: *Vector<string>, fset: *FlagSet) -> void {
     // Loop over the flags in the set
     mut i: int64 = 0
     while i < fset.len() {
-        // Push the name when required and not changed
+        // Push the name when required and nothing at all gave it a value
         f: *Flag = fset.get(i)
-        if (*f).required && !(*f).changed {
+        if (*f).required && !flagIsSet(f) {
             vec_push(out, (*f).name)
         }
         i = i + 1
@@ -137,13 +178,21 @@ func execCheckRequired(chain: *Vector<*Command>) -> error {
 
     // Nothing missing
     if vec_len(missing) == 0 {
+        vec_free(missing)
+        free(missing)
         return error {}
     }
 
-    // Sort the names and build the message
+    // Sort the names and build the message around them
     vec_sort(missing, str_cmp)
     joined: string = textJoinQuoted(missing, ", ")
-    return error { message: "required flag(s) " + joined + " not set" }
+    msg: string = textCat3("required flag(s) ", joined, " not set")
+
+    // Free the joined names and the working vector, whose names belong to the flags
+    free(joined)
+    vec_free(missing)
+    free(missing)
+    return error { message: msg }
 }
 
 // Checks the leaf's flag groups in declaration order, the first one the run breaks wins
@@ -271,12 +320,12 @@ func execRunHooks(ctx: *Context) -> (int32, error) {
 }
 
 // Reports the unknown command error for word against subject and hands it back
-func execUnknownCommand(chain: *Vector<*Command>, subject: *Command, word: string) -> (int32, error) {
+func execUnknownCommand(rootc: *Command, chain: *Vector<*Command>, subject: *Command, word: string) -> (int32, error) {
     // The message Cobra prints for a word that names no command
-    msg: string = "unknown command \"" + word + "\" for \"" + (*subject).path + "\""
+    msg: string = textCat5("unknown command \"", word, "\" for \"", (*subject).path, "\"")
 
     // Report it against the command the word was typed under
-    return (ctxReportError(chain, subject, msg), error { message: msg })
+    return execFail(rootc, chain, subject, error { message: msg })
 }
 
 /**
@@ -296,7 +345,7 @@ func execRunDispatch(rootc: *Command, st: *ParseState, ctx: *Context, perr: erro
 
     // Report a flag error
     if perr.exists() {
-        return (ctxReportError(chain, curc, perr.message), perr)
+        return execFail(rootc, chain, curc, perr)
     }
 
     // Print help when it was asked for
@@ -318,7 +367,7 @@ func execRunDispatch(rootc: *Command, st: *ParseState, ctx: *Context, perr: erro
     // A command without a run either has an unknown word or prints its help
     if !cmdIsRunnable(curc) {
         if vec_len(pos) > 0 {
-            return execUnknownCommand(chain, curc, vec_get(pos, 0))
+            return execUnknownCommand(rootc, chain, curc, vec_get(pos, 0))
         }
         helpDispatch(ctx)
         return (0, error {})
@@ -326,16 +375,24 @@ func execRunDispatch(rootc: *Command, st: *ParseState, ctx: *Context, perr: erro
 
     // Warn when the command is deprecated
     if (*curc).deprecated != "" {
-        warn: string = "Command \"" + (*curc).name + "\" is deprecated, " + (*curc).deprecated + "\n"
+        warn: string = textCat5("Command \"", (*curc).name, "\" is deprecated, ", (*curc).deprecated, "\n")
         sinkWrite(sinkResolveErr(chain), warn)
         free(warn)
+    }
+
+    // Fill in from the environment and the config file what the line left alone, which the builtins skip
+    if !(*curc).isBuiltin {
+        cerr: error = configApply(chain)
+        if cerr.exists() {
+            return execFail(rootc, chain, curc, cerr)
+        }
     }
 
     // Check the required flags, which the builtins and a command that parses no flags of its own skip
     if !(*curc).isBuiltin && !(*curc).disableFlagParsing {
         rerr: error = execCheckRequired(chain)
         if rerr.exists() {
-            return (ctxReportError(chain, curc, rerr.message), rerr)
+            return execFail(rootc, chain, curc, rerr)
         }
     }
 
@@ -343,7 +400,7 @@ func execRunDispatch(rootc: *Command, st: *ParseState, ctx: *Context, perr: erro
     if !(*curc).isBuiltin && !(*curc).disableFlagParsing {
         gerr: error = execCheckGroups(chain, curc)
         if gerr.exists() {
-            return (ctxReportError(chain, curc, gerr.message), gerr)
+            return execFail(rootc, chain, curc, gerr)
         }
     }
 
@@ -356,7 +413,7 @@ func execRunDispatch(rootc: *Command, st: *ParseState, ctx: *Context, perr: erro
     // Validate the positionals against the command's args rule
     aerr: error = argsValidateFirst((*curc).args, vec_len(pos), first, (*curc).path)
     if aerr.exists() {
-        return (ctxReportError(chain, curc, aerr.message), aerr)
+        return execFail(rootc, chain, curc, aerr)
     }
 
     // Run the hook chain of the command found
@@ -399,7 +456,7 @@ func execDispatch(rootc: *Command, st: *ParseState, argv: string[]) -> (int32, e
  * Fixes up the tree, finds the command argv names, parses its flags and runs it, handing back the error it reported along with the exit code, the scanner state and the Context live only for this call and are freed before it returns
  * @param rootc {*Command} - the root command of the tree
  * @param argv {string[]} - the raw argv, argv[0] is the program name and is skipped
- * @return the exit code and the error already printed per the silence flags, a clean error after help, the version line and a successful run
+ * @return the exit code and the error already printed per the silence flags, a clean error after help, the version line and a successful run, the message of an error nova itself built belonging to the tree and reading until the next call on the same root or novaFreeTree
  **/
 export func novaExecuteE(rootc: *Command, argv: string[]) -> (int32, error) {
     // Fix up the tree before scanning

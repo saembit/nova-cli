@@ -1,0 +1,177 @@
+// Unit test root for nova/completion.dusk, the hidden __complete and
+// __completeNoDesc commands the generated scripts call back into. Run it with
+// cd tests/unit && dusk run completion_test.dusk 2>&1 | diff - completion_test.expected.
+// The cases the golden cases under tests/cases cannot reach live here: a short, a
+// help text and a func supplied candidate carrying a newline, which every line of
+// output has to stop at, and the "--" that ends the flags of a line.
+// Each argv below is a fixed array minted as collector<string[]>, because
+// novaExecute stores argv in a heap Context handed to opaque handlers and the
+// escape checker refuses a plain frame slice here.
+@paradigm oop
+@paradigm procedural
+
+// Stdlib pieces the candidate vectors lean on
+@import std.string
+@import std.vector
+
+// The nova library, the tree, the flags and the executor that runs the request
+@import nova.command
+@import nova.context
+@import nova.flagset
+@import nova.args
+@import nova.text
+@import nova.completion
+@import nova.exec
+
+/**
+ * noop
+ * The handler every command in the tree carries, since only completion is under test
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - 0, nothing here can fail
+ **/
+func noop(ctx: *Context) -> int32 {
+    // Say which command ran so a case that reaches a handler is visible
+    println("ran {}", ctx.commandPath())
+
+    // Nothing here can fail
+    return 0
+}
+
+/**
+ * subArgs
+ * The positional candidates of sub, one of them carrying a newline the printer has to cut
+ * @param ctx {*Context} - the run context nova builds for the completion request
+ * @param toComplete {string} - the text typed so far, echoed back so the case shows what arrived
+ * @return the candidates, freed by nova, and the directive keeping file names out of the list
+ **/
+func subArgs(ctx: *Context, toComplete: string) -> (*Vector<string>, int64) {
+    // The candidate vector, which nova frees once it has printed it
+    out: *Vector<string> = alloc(vec_new())
+
+    // A plain candidate
+    vec_push(out, "one")
+
+    // A candidate whose second line would read as a candidate of its own
+    vec_push(out, "two\nnot a candidate")
+
+    // The text the request carried, so the case shows which word reached the func
+    vec_push(out, "tc=" + toComplete)
+
+    // Hand them back with file name completion turned off
+    return (out, compNoFileComp())
+}
+
+/**
+ * nameVals
+ * The values --name offers, one of them carrying a newline inside its description
+ * @param ctx {*Context} - the run context nova builds for the completion request
+ * @param toComplete {string} - the text typed so far, which the shell filters on itself
+ * @return the candidates, freed by nova, and the directive keeping file names out of the list
+ **/
+func nameVals(ctx: *Context, toComplete: string) -> (*Vector<string>, int64) {
+    // The candidate vector, which nova frees once it has printed it
+    out: *Vector<string> = alloc(vec_new())
+
+    // A plain name
+    vec_push(out, "alice")
+
+    // A name whose description runs onto a second line
+    vec_push(out, "bob\tthe builder\nof things")
+
+    // Hand them back with file name completion turned off
+    return (out, compNoFileComp())
+}
+
+/**
+ * buildRoot
+ * Builds the tree the cases below complete against, a root with two children and every flag kind completion looks at
+ * @return the root command, ready for novaExecute
+ **/
+func buildRoot() -> *Command {
+    // The root, which parses one persistent flag
+    root: *Command = cmdNew("app", "root")
+    root.persistentFlags().addBool("verbose", "v", false, "verbose")
+
+    // The child every value case runs against
+    sub: *Command = cmdNew("sub", "the sub")
+    sub.localFlags().addBool("flag", "f", false, "a bool")
+    sub.localFlags().addStr("name", "n", "", "a name\nspanning two lines")
+    sub.localFlags().addChoice("mode", "m", "a", "a,b", "a mode")
+    sub.registerFlagCompletionFunc("name", nameVals)
+    sub.setValidArgsFunc(subArgs)
+    sub.setRun(noop)
+
+    // The child whose short description runs onto a second line
+    nl: *Command = cmdNew("nl", "line one\nline two")
+    nl.setRun(noop)
+
+    // Hang both children off the root
+    root.addCommand(sub)
+    root.addCommand(nl)
+    return root
+}
+
+/**
+ * main
+ * Runs one completion request per case against the tree and prints what the shell would have read
+ * @param argc {int32} - the argument count, unused here
+ * @param argv {string[]} - the raw command line, unused here
+ * @return int32 - 0, the harness compares the output rather than the status
+ **/
+func main(argc: int32, argv: string[]) -> int32 {
+    // The tree every case completes against
+    root: *Command = buildRoot()
+
+    // A child short carrying a newline is cut at it, so no second line reads as a candidate
+    println("## newline in a child short")
+    a1: string[3] = ["app", "__complete", ""]
+    novaExecute(root, collector<string[]>(a1[0..a1.len]))
+
+    // The same request with the descriptions dropped
+    println("## newline in a child short, no descriptions")
+    a2: string[3] = ["app", "__completeNoDesc", ""]
+    novaExecute(root, collector<string[]>(a2[0..a2.len]))
+
+    // A flag help carrying a newline is cut at it too
+    println("## newline in a flag help")
+    a3: string[4] = ["app", "__complete", "sub", "-"]
+    novaExecute(root, collector<string[]>(a3[0..a3.len]))
+
+    // A func supplied positional carrying a newline is cut at it
+    println("## newline in a validArgsFunc candidate")
+    a4: string[4] = ["app", "__complete", "sub", ""]
+    novaExecute(root, collector<string[]>(a4[0..a4.len]))
+
+    // A func supplied value carrying a newline inside its description is cut at it
+    println("## newline in a flag func candidate")
+    a5: string[5] = ["app", "__complete", "sub", "--name", ""]
+    novaExecute(root, collector<string[]>(a5[0..a5.len]))
+
+    // A "--" ends the flags, so a dash after it completes a positional
+    println("## -- ends the flags of the root")
+    a6: string[4] = ["app", "__complete", "--", "-"]
+    novaExecute(root, collector<string[]>(a6[0..a6.len]))
+
+    // The same under a child, whose positionals its func offers
+    println("## -- ends the flags of a child")
+    a7: string[5] = ["app", "__complete", "sub", "--", "-"]
+    novaExecute(root, collector<string[]>(a7[0..a7.len]))
+
+    // A flag after the "--" is a positional word, not a flag waiting for its value
+    println("## -- ends the flag values too")
+    a8: string[6] = ["app", "__complete", "sub", "--", "--name", ""]
+    novaExecute(root, collector<string[]>(a8[0..a8.len]))
+
+    // A shorthand carrying its value behind an "=", the candidates carrying the "-n=" back
+    println("## -n=prefix completes the value")
+    a9: string[4] = ["app", "__complete", "sub", "-n=al"]
+    novaExecute(root, collector<string[]>(a9[0..a9.len]))
+
+    // A cluster whose last letter names the flag the value belongs to
+    println("## a cluster completes the value of its last letter")
+    a10: string[5] = ["app", "__complete", "sub", "-vn", ""]
+    novaExecute(root, collector<string[]>(a10[0..a10.len]))
+
+    // The harness compares the output, not the status
+    return 0
+}

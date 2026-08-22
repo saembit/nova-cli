@@ -12,6 +12,7 @@
 // Stdlib pieces the assertions lean on
 @import std.string
 @import std.vector
+@import std.fs
 
 // The whole nova library, since executing a command touches all of it
 @import nova.command
@@ -21,6 +22,11 @@
 @import nova.text
 @import nova.sink
 @import nova.exec
+
+// setenv, which the environment binding cases need and dusk itself does not wrap
+foreign "C" {
+    func setenv(name: *raw char, value: *raw char, overwrite: int32) -> int32
+}
 
 /**
  * rootPpre
@@ -643,6 +649,100 @@ func showE(label: string, code: int32, e: error) -> void {
 }
 
 /**
+ * envSet
+ * Sets one environment variable for the rest of this process, which dusk itself has no way to do
+ * @param name {string} - the variable name
+ * @param value {string} - the value it takes
+ * @return void
+ **/
+func envSet(name: string, value: string) -> void {
+    // The two C strings setenv wants
+    n: *raw char = cbuf(name)
+    v: *raw char = cbuf(value)
+
+    // Set it, overwriting whatever the caller's environment held
+    rc: int32 = setenv(n, v, 1)
+
+    // Anything but 0 means the variable is not there and every case below would drift
+    if rc != 0 {
+        println("setenv failed for {}", name)
+    }
+
+    // Free the two buffers
+    free(n)
+    free(v)
+}
+
+/**
+ * bindRun
+ * Prints the flags of the binding tree together with where each of their values came from
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func bindRun(ctx: *Context) -> int32 {
+    // The string slice joined so one line holds every flag
+    tags: string = str_join(ctx.getStrs("tags"), "|")
+
+    // Each value followed by the source that gave it
+    println("go: name={} ({}) port={} ({}) tags={} ({}) quiet={} ({})", ctx.getStr("name"), flagSourceWord(ctx.source("name")), ctx.getInt("port"), flagSourceWord(ctx.source("port")), tags, flagSourceWord(ctx.source("tags")), textBool(ctx.getBool("quiet")), flagSourceWord(ctx.source("quiet")))
+
+    // Free the joined tags
+    free(tags)
+
+    // Nothing here can fail
+    return 0
+}
+
+/**
+ * needRun
+ * Prints the required flag whichever source ended up supplying it
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func needRun(ctx: *Context) -> int32 {
+    // The token and where it came from
+    println("need: token={} ({})", ctx.getStr("token"), flagSourceWord(ctx.source("token")))
+
+    // Nothing here can fail
+    return 0
+}
+
+/**
+ * buildRoot6
+ * Builds the tree the env and config bindings are exercised on, a root carrying the prefix, a default file that is not there and the name of the config flag
+ * @return *Command - the root of the tree
+ **/
+func buildRoot6() -> *Command {
+    // The root command, which names the prefix and the file
+    root: *Command = cmdNew("app6", "Env and config binding")
+    root.setEnvPrefix("APP6")
+    root.setConfigFile("exec_test_missing.json")
+    root.setConfigFlag("config")
+    root.persistentFlags().addStr("config", "", "", "config file")
+    root.persistentFlags().addBool("quiet", "q", false, "say less")
+
+    // go carries one flag of three kinds a file or the environment can fill
+    go: *Command = cmdNew("go", "Show where every value came from")
+    go.setArgs(argsNone())
+    go.localFlags().addStr("name", "n", "world", "who to greet")
+    go.localFlags().addInt("port", "p", 8080, "port to listen on")
+    go.localFlags().addStrs("tags", "", "", "tags to attach")
+    go.setRun(bindRun)
+    root.addCommand(go)
+
+    // need carries a required flag any source may satisfy
+    need: *Command = cmdNew("need", "Require a flag any source may fill")
+    need.setArgs(argsNone())
+    need.localFlags().addStr("token", "t", "", "the token")
+    need.localFlags().markRequired("token")
+    need.setRun(needRun)
+    root.addCommand(need)
+
+    // Hand the tree back
+    return root
+}
+
+/**
  * main
  * Runs every execution case against the three test trees and prints what each one produced
  * @param argc {int32} - the argument count, unused here
@@ -777,8 +877,8 @@ func main(argc: int32, argv: string[]) -> int32 {
 
     // The same tree with completion kept, which also skips the required flag check
     root3: *Command = buildRoot3()
-    b6: string[3] = ["app3", "completion", "fish"]
-    show("app3 completion fish", novaExecute(root3, collector<string[]>(b6[0..b6.len])))
+    b6: string[3] = ["app3", "completion", "powershell"]
+    show("app3 completion powershell", novaExecute(root3, collector<string[]>(b6[0..b6.len])))
     b7: string[2] = ["app3", "--help"]
     show("app3 --help", novaExecute(root3, collector<string[]>(b7[0..b7.len])))
 
@@ -896,6 +996,73 @@ func main(argc: int32, argv: string[]) -> int32 {
     showBuf("out", o5)
     showBuf("err", r5)
     showE("app5 bogus", code5, cerr5)
+
+    // The tree whose flags the environment and a config file fill in
+    println("## env and config binding")
+    root6: *Command = buildRoot6()
+
+    // Nothing set anywhere, and a default config file that is not there, which is silent
+    g1: string[2] = ["app6", "go"]
+    show("app6 go", novaExecute(root6, collector<string[]>(g1[0..g1.len])))
+
+    // The environment fills every flag the line left alone
+    envSet("APP6_NAME", "fromenv")
+    envSet("APP6_PORT", "9000")
+    envSet("APP6_TAGS", "a,b")
+    envSet("APP6_QUIET", "true")
+    show("app6 go, environment set", novaExecute(root6, collector<string[]>(g1[0..g1.len])))
+
+    // The command line beats the environment, and only the line sets changed
+    g2: string[4] = ["app6", "go", "-n", "typed"]
+    show("app6 go -n typed", novaExecute(root6, collector<string[]>(g2[0..g2.len])))
+
+    // A value the kind refuses is the same message the line would have earned
+    envSet("APP6_PORT", "abc")
+    show("app6 go, APP6_PORT=abc", novaExecute(root6, collector<string[]>(g1[0..g1.len])))
+
+    // The builtins read neither the environment nor a file, so help still runs
+    g3: string[3] = ["app6", "help", "go"]
+    show("app6 help go, APP6_PORT=abc", novaExecute(root6, collector<string[]>(g3[0..g3.len])))
+
+    // An empty value counts as unset, which is how the rest of the cases clear the environment
+    envSet("APP6_NAME", "")
+    envSet("APP6_PORT", "")
+    envSet("APP6_TAGS", "")
+    envSet("APP6_QUIET", "")
+
+    // The config file this test writes beside itself, whose go section overrides its own flat port
+    cfgPath: string = "exec_test_config.json"
+    we: error = write_file(cfgPath, "{ \"name\": \"fromfile\", \"port\": 3000, \"tags\": [\"x\", \"y z\"], \"quiet\": true, \"go\": { \"port\": 42 } }")
+    if we.exists() {
+        println("write_file failed: {}", we.message)
+    }
+
+    // The file fills everything, the command's own section beating the flat key
+    g4: string[4] = ["app6", "go", "--config", cfgPath]
+    show("app6 go --config exec_test_config.json", novaExecute(root6, collector<string[]>(g4[0..g4.len])))
+
+    // The environment beats the file, which still fills what it left alone
+    envSet("APP6_NAME", "fromenv")
+    show("app6 go --config, APP6_NAME set", novaExecute(root6, collector<string[]>(g4[0..g4.len])))
+    envSet("APP6_NAME", "")
+
+    // A file the flag names and that is not there is an error, unlike the default one
+    g5: string[4] = ["app6", "go", "--config", "exec_test_nope.json"]
+    code6, cerr6 := novaExecuteE(root6, collector<string[]>(g5[0..g5.len]))
+    showE("app6 go --config exec_test_nope.json", code6, cerr6)
+
+    // A required flag the environment supplies, and the same command without it
+    envSet("APP6_TOKEN", "fromenv")
+    g6: string[2] = ["app6", "need"]
+    show("app6 need, APP6_TOKEN set", novaExecute(root6, collector<string[]>(g6[0..g6.len])))
+    envSet("APP6_TOKEN", "")
+    show("app6 need", novaExecute(root6, collector<string[]>(g6[0..g6.len])))
+
+    // Take the config file back out again
+    re: error = remove_file(cfgPath)
+    if re.exists() {
+        println("remove_file failed: {}", re.message)
+    }
 
     // The test harness compares output, so the exit code is always 0
     return 0

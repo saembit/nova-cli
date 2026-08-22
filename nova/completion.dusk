@@ -1,6 +1,7 @@
 /**
  * nova/completion.dusk
- * The builtin completion [bash|zsh] command, it writes a static shell completion script with the command tree baked in
+ * Shell completion, the hidden __complete and __completeNoDesc commands a generated script calls back into and the builtin completion [bash|zsh|fish] command that writes those scripts
+ * A call prints one candidate per line, the name alone or the name, a tab and its description, then a last line ":N" carrying the directive bits compError, compNoSpace and compNoFileComp, and it always exits 0
  **/
 @paradigm oop
 @paradigm procedural
@@ -9,8 +10,51 @@
 @import std.vector
 @import flagset
 @import args
+@import text
 @import command
 @import context
+@import help
+@import parse
+
+/**
+ * compDefault
+ * The directive that asks the shell for nothing beyond its own file completion
+ * @return 0
+ **/
+export func compDefault() -> int64 {
+    // The zero directive
+    return 0
+}
+
+/**
+ * compError
+ * The directive bit saying the request went wrong and the shell should offer nothing
+ * @return 1
+ **/
+export func compError() -> int64 {
+    // The error bit
+    return 1
+}
+
+/**
+ * compNoSpace
+ * The directive bit saying no space is added after a candidate the shell takes
+ * @return 2
+ **/
+export func compNoSpace() -> int64 {
+    // The no space bit
+    return 2
+}
+
+/**
+ * compNoFileComp
+ * The directive bit saying the shell must not fall back to file names
+ * @return 4
+ **/
+export func compNoFileComp() -> int64 {
+    // The no file completion bit
+    return 4
+}
 
 // Checks if c is an ASCII letter, digit or underscore
 func completionIsWordChar(c: char) -> bool {
@@ -67,269 +111,748 @@ export func completionIdent(app: string) -> string {
 
 /**
  * completionFuncName
- * The name of the bash function the generated script defines, such as "_todo_completions"
+ * The name of the shell function the generated script defines, such as "_todo_completions"
  * @param app {string} - the application name, borrowed
  * @return a fresh heap string
  **/
 export func completionFuncName(app: string) -> string {
     // The ident of the app and the function name around it
     id: string = completionIdent(app)
-    out: string = "_" + id + "_completions"
+    out: string = textCat3("_", id, "_completions")
     free(id)
     return out
 }
 
-// Appends s to out unless an equal string is already there
-func completionPushUnique(out: *Vector<string>, s: string) -> void {
-    // Loop over the strings collected so far
+/**
+ * completionTake
+ * Hands a vector back as an owned one, the way nova takes over what a completion func returned
+ * @param v {*Vector<string>} - the vector the func built
+ * @return the same vector, now owned by the caller
+ **/
+func completionTake(v: *Vector<string>) -> *Vector<string> {
+    // Return it unchanged
+    return v
+}
+
+// Appends one candidate line, the name alone or the name, a tab and its description
+func completionPushCand(out: *Vector<string>, name: string, desc: string) -> void {
+    // A candidate with no description is the bare name
+    if desc == "" {
+        vec_push(out, substring(name, 0, str_len(name)))
+        return
+    }
+
+    // The name, a tab and the description
+    vec_push(out, textCat3(name, "\t", desc))
+}
+
+/**
+ * CompFlag
+ * One flag candidate while the flags of a command are being gathered, the long name it sorts by beside the shorthand and the help text both spellings print
+ **/
+struct CompFlag {
+    name: string,
+    short: string,
+    help: string,
+}
+
+// Orders two flag candidates by long name for vec_sort
+func completionCmpFlag(a: *CompFlag, b: *CompFlag) -> int32 {
+    // Compare the long names
+    return str_cmp((*a).name, (*b).name)
+}
+
+// Appends a flag candidate unless one under the same name is already there, the nearer definition winning
+func completionPushFlag(out: *Vector<*CompFlag>, name: string, short: string, help: string) -> void {
+    // Loop over the candidates gathered so far
     mut i: int64 = 0
     while i < vec_len(out) {
-        if vec_get(out, i) == s {
+        // A name already taken by a nearer command wins
+        e: *CompFlag = vec_get(out, i)
+        if (*e).name == name {
             return
         }
         i = i + 1
     }
 
-    // Not there yet
-    vec_push(out, s)
+    // Push the candidate
+    vec_push(out, alloc(CompFlag { name: name, short: short, help: help }))
 }
 
-// Pushes the long names of every visible flag of fset onto out
-func completionCollectFlagNames(out: *Vector<string>, fset: *FlagSet) -> void {
+// Appends every visible flag of fset as a candidate
+func completionPushSet(out: *Vector<*CompFlag>, fset: *FlagSet) -> void {
     // Loop over the flags in the set
     mut i: int64 = 0
     while i < fset.len() {
+        // Push it unless it is hidden or deprecated
         f: *Flag = fset.get(i)
         if !(*f).hidden && (*f).deprecated == "" {
-            completionPushUnique(out, (*f).name)
+            completionPushFlag(out, (*f).name, (*f).short, (*f).help)
         }
         i = i + 1
     }
 }
 
-// The case label of a child, "set" under the root, "config set" under "config"
-func completionChildLabel(lbl: string, name: string) -> string {
-    // The root label is empty so the child label is just the name
-    if lbl == "" {
-        return substring(name, 0, str_len(name))
+// Appends one line per spelling of every flag the leaf takes, the long name first and the shorthand after it, sorted by long name
+func completionFlagLines(out: *Vector<string>, chain: *Vector<*Command>, leaf: *Command) -> void {
+    // The candidates, the leaf's own flags first so a nearer definition wins
+    cands: *Vector<*CompFlag> = alloc(vec_new())
+    lf: *FlagSet = (*leaf).flags
+    completionPushSet(cands, lf)
+
+    // Then the persistent flags of every chain entry from the leaf up to the root
+    mut k: int64 = vec_len(chain) - 1
+    while k >= 0 {
+        c: *Command = vec_get(chain, k)
+        pf: *FlagSet = (*c).pflags
+        completionPushSet(cands, pf)
+        k = k - 1
     }
-    return lbl + " " + name
+
+    // The synthesized --help, which no command declares as a flag
+    hh: string = helpFlagHelp(leaf)
+    completionPushFlag(cands, "help", "h", hh)
+
+    // Sort the candidates by long name
+    vec_sort(cands, completionCmpFlag)
+
+    // Loop over the sorted candidates
+    mut i: int64 = 0
+    while i < vec_len(cands) {
+        // The current candidate
+        e: *CompFlag = vec_get(cands, i)
+
+        // The long spelling
+        long: string = "--" + (*e).name
+        completionPushCand(out, long, (*e).help)
+        free(long)
+
+        // The short spelling when the flag has one
+        if (*e).short != "" {
+            short: string = "-" + (*e).short
+            completionPushCand(out, short, (*e).help)
+            free(short)
+        }
+        i = i + 1
+    }
+
+    // Free the candidates and their vector
+    while vec_len(cands) > 0 {
+        e2: *CompFlag = vec_take(cands, vec_len(cands) - 1)
+        free(e2)
+    }
+    vec_free(cands)
+    free(cands)
+    free(hh)
 }
 
-// Appends one arm of the word table, "<lbl>|<word>") cmd="<child>" ;;
-func completionPushMapArm(sb: *StringBuilder, lbl: string, word: string, child: string) -> void {
-    sb_push(sb, "            \"")
-    sb_push(sb, lbl)
-    sb_push(sb, "|")
-    sb_push(sb, word)
-    sb_push(sb, "\") cmd=\"")
-    sb_push(sb, child)
-    sb_push(sb, "\" ;;\n")
+// Finds the chain entry and registry slot of the completion func registered for a flag, the nearest one from the leaf up
+func completionFindFlagFunc(chain: *Vector<*Command>, name: string) -> (int64, int64, bool) {
+    // Walk the chain from the leaf up to the root
+    mut k: int64 = vec_len(chain) - 1
+    while k >= 0 {
+        // The first command that registered one wins
+        c: *Command = vec_get(chain, k)
+        idx: int64 = cmdFindFlagComp((*c).compFuncs, name)
+        if idx >= 0 {
+            return (k, idx, true)
+        }
+        k = k - 1
+    }
+
+    // Nothing on the chain registered one
+    return (-1, -1, false)
 }
 
-/**
- * completionPushOptsArm
- * Appends one arm of the candidate table, the child names, validArgs, -h and every long flag the command accepts
- * @param sb {*StringBuilder} - the builder for the candidate table
- * @param c {*Command} - the command
- * @param lbl {string} - the case label of the command
- * @param shown {*Vector<*Command>} - the visible children
- * @param inherited {*Vector<string>} - the long names of the ancestors' persistent flags
- * @return ...
- **/
-func completionPushOptsArm(sb: *StringBuilder, c: *Command, lbl: string, shown: *Vector<*Command>, inherited: *Vector<string>) -> void {
-    // The word candidates, the child names first
-    words: *Vector<string> = alloc(vec_new())
+// Appends the candidates a completion func handed back, each carrying the prefix, and gives the directive it asked for
+func completionCallFunc(out: *Vector<string>, e: *FlagCompFunc, cctx: *Context, pfx: string, toComplete: string) -> int64 {
+    // The func the entry holds, read out of the field before it is called
+    fn := (*e).f
+
+    // The candidates and the directive it wants
+    raw, dir := fn(cctx, toComplete)
+
+    // The vector as an owned one, since a tuple from an indirect call carries no element type
+    got: *Vector<string> = completionTake(raw)
+
+    // Loop over the candidates it gave
+    mut i: int64 = 0
+    while i < vec_len(got) {
+        // Push it with the prefix in front
+        line: string = pfx + vec_get(got, i)
+        vec_push(out, line)
+        i = i + 1
+    }
+
+    // Free the vector, the strings inside it are the caller's own and stay
+    vec_free(got)
+    free(got)
+
+    // Return the directive the func asked for
+    return dir
+}
+
+// Appends the values a flag can take, its choices or whatever a registered func offers, each carrying the prefix
+func completionFlagValues(out: *Vector<string>, cctx: *Context, chain: *Vector<*Command>, f: *Flag, pfx: string, toComplete: string) -> int64 {
+    // A choice flag offers its alternatives
+    choices: *Vector<string> = (*f).choices
+    if vec_len(choices) > 0 {
+        // Loop over the alternatives in declaration order
+        mut i: int64 = 0
+        while i < vec_len(choices) {
+            line: string = pfx + vec_get(choices, i)
+            vec_push(out, line)
+            i = i + 1
+        }
+
+        // A list was given so the shell must not add file names
+        return compNoFileComp()
+    }
+
+    // A registered func offers whatever it wants
+    ci, fi, found := completionFindFlagFunc(chain, (*f).name)
+    if found {
+        // The command that registered it and the entry
+        c: *Command = vec_get(chain, ci)
+        comps: *Vector<*FlagCompFunc> = (*c).compFuncs
+        e: *FlagCompFunc = vec_get(comps, fi)
+
+        // Call it and take its directive
+        return completionCallFunc(out, e, cctx, pfx, toComplete)
+    }
+
+    // Nothing is known about this flag's values
+    return compDefault()
+}
+
+// Resolves the flag the last word on the line is waiting for a value for, not found when there is no such word
+func completionValueFlag(st: *ParseState, chain: *Vector<*Command>) -> (*FlagSet, int64, bool) {
+    // The words typed before the one being completed
+    words: *Vector<string> = (*st).words
+    n: int64 = vec_len(words)
+
+    // Nothing was typed before it
+    if n == 0 {
+        return ctxLookupChain(chain, "")
+    }
+
+    // The word right before the one being completed
+    last: string = vec_get(words, n - 1)
+
+    // A long flag with no "=" may be waiting for its value
+    if textIsLongFlag(last) && !str_contains(last, "=") {
+        name: string = substring(last, 2, str_len(last))
+        fset, idx, found := ctxLookupChain(chain, name)
+        free(name)
+        return (fset, idx, found)
+    }
+
+    // A short flag or a cluster carrying no "=" may be waiting for its value, its last letter naming the flag the way Cobra reads it
+    if textIsShortFlag(last) && !str_contains(last, "=") {
+        ch: string = textCharAt(last, str_len(last) - 1)
+        fset2, idx2, found2 := ctxLookupShortChain(chain, ch)
+        free(ch)
+        return (fset2, idx2, found2)
+    }
+
+    // The word before is not a flag waiting for anything
+    return ctxLookupChain(chain, "")
+}
+
+// Appends the values of the flag an "=" token named, each candidate carrying the token up to and including the "=" back
+func completionEqOne(out: *Vector<string>, cctx: *Context, chain: *Vector<*Command>, toComplete: string, eq: int64, fset: *FlagSet, idx: int64, found: bool) -> int64 {
+    // An unknown name has no values
+    if !found {
+        return compDefault()
+    }
+
+    // The flag the name resolved to, which has nothing to offer unless it takes a value
+    f: *Flag = fset.get(idx)
+    if !flagTakesValue(f) {
+        return compDefault()
+    }
+
+    // The value text after the "=" and the prefix every candidate carries back
+    val: string = substring(toComplete, eq + 1, str_len(toComplete))
+    pfx: string = substring(toComplete, 0, eq + 1)
+
+    // The values with the prefix in front of each
+    dir: int64 = completionFlagValues(out, cctx, chain, f, pfx, val)
+
+    // Free the pieces the token was split into
+    free(pfx)
+    free(val)
+    return dir
+}
+
+// Appends the values of a "--name=prefix" or "-n=prefix" token, the candidates carrying the "--name=" or the "-n=" back the way Cobra hands them over
+func completionEqValues(out: *Vector<string>, cctx: *Context, chain: *Vector<*Command>, toComplete: string) -> int64 {
+    // The "=" the name and the value hang off
+    eq: int64 = str_find(toComplete, "=")
+
+    // A long token names its flag with everything between the dashes and the "="
+    if starts_with(toComplete, "--") {
+        name: string = substring(toComplete, 2, eq)
+        fset, idx, found := ctxLookupChain(chain, name)
+        free(name)
+        return completionEqOne(out, cctx, chain, toComplete, eq, fset, idx, found)
+    }
+
+    // A short token names it with the letter right before the "=", the last one of a cluster
+    ch: string = textCharAt(toComplete, eq - 1)
+    fset2, idx2, found2 := ctxLookupShortChain(chain, ch)
+    free(ch)
+    return completionEqOne(out, cctx, chain, toComplete, eq, fset2, idx2, found2)
+}
+
+// Appends the children of the leaf, each name and each alias with the child's short description
+func completionKidLines(out: *Vector<string>, leaf: *Command) -> int64 {
+    // The children help and completion show
+    shown: *Vector<*Command> = cmdVisibleKids(leaf)
+
+    // Loop over them in name order
     mut i: int64 = 0
     while i < vec_len(shown) {
+        // The current child, its name and every alias it answers to
         k: *Command = vec_get(shown, i)
-        completionPushUnique(words, (*k).name)
-        i = i + 1
-    }
-
-    // Then the validArgs
-    valid: *Vector<string> = (*c).validArgs
-    mut v: int64 = 0
-    while v < vec_len(valid) {
-        completionPushUnique(words, vec_get(valid, v))
-        v = v + 1
-    }
-
-    // The flag names, the inherited ones first
-    names: *Vector<string> = alloc(vec_new())
-    mut j: int64 = 0
-    while j < vec_len(inherited) {
-        completionPushUnique(names, vec_get(inherited, j))
-        j = j + 1
-    }
-
-    // Then the command's own local and persistent flags and help, sorted
-    lf: *FlagSet = (*c).flags
-    pf: *FlagSet = (*c).pflags
-    completionCollectFlagNames(names, lf)
-    completionCollectFlagNames(names, pf)
-    completionPushUnique(names, "help")
-    vec_sort(names, str_cmp)
-
-    // The arm label
-    sb_push(sb, "        \"")
-    sb_push(sb, lbl)
-    sb_push(sb, "\") opts=\"")
-
-    // The words
-    mut w: int64 = 0
-    while w < vec_len(words) {
-        sb_push(sb, vec_get(words, w))
-        sb_push(sb, " ")
-        w = w + 1
-    }
-
-    // -h and the long flags
-    sb_push(sb, "-h")
-    mut n: int64 = 0
-    while n < vec_len(names) {
-        sb_push(sb, " --")
-        sb_push(sb, vec_get(names, n))
-        n = n + 1
-    }
-    sb_push(sb, "\" ;;\n")
-}
-
-/**
- * completionWalk
- * Walks the tree depth first, appending the word table arms to mapSb and the candidate table arms to optsSb
- * @param c {*Command} - the command to visit
- * @param lbl {string} - its case label
- * @param inherited {*Vector<string>} - the long names of the ancestors' persistent flags
- * @param mapSb {*StringBuilder} - the builder for the word table
- * @param optsSb {*StringBuilder} - the builder for the candidate table
- * @return ...
- **/
-func completionWalk(c: *Command, lbl: string, inherited: *Vector<string>, mapSb: *StringBuilder, optsSb: *StringBuilder) -> void {
-    // The visible children and this command's candidate arm
-    shown: *Vector<*Command> = cmdVisibleKids(c)
-    completionPushOptsArm(optsSb, c, lbl, shown, inherited)
-
-    // The inherited names for the children, plus this command's persistent flags
-    sub: *Vector<string> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < vec_len(inherited) {
-        completionPushUnique(sub, vec_get(inherited, i))
-        i = i + 1
-    }
-    pf: *FlagSet = (*c).pflags
-    completionCollectFlagNames(sub, pf)
-
-    // Loop over the children
-    mut j: int64 = 0
-    while j < vec_len(shown) {
-        // The child and its label
-        k: *Command = vec_get(shown, j)
-        child: string = completionChildLabel(lbl, (*k).name)
-
-        // One word arm for the name and one per alias
-        completionPushMapArm(mapSb, lbl, (*k).name, child)
+        completionPushCand(out, (*k).name, (*k).short)
         aliases: *Vector<string> = (*k).aliases
         mut a: int64 = 0
         while a < vec_len(aliases) {
-            completionPushMapArm(mapSb, lbl, vec_get(aliases, a), child)
+            completionPushCand(out, vec_get(aliases, a), (*k).short)
             a = a + 1
         }
-
-        // Recurse into the child
-        completionWalk(k, child, sub, mapSb, optsSb)
-        j = j + 1
+        i = i + 1
     }
+
+    // The number of children before the vector goes
+    n: int64 = vec_len(shown)
+    vec_free(shown)
+    free(shown)
+    return n
 }
 
-// Appends the bash completion function, the definition only with no complete call
-func completionPushBashFunc(sb: *StringBuilder, rootc: *Command, fname: string) -> void {
-    // Build the word table and candidate table by walking the tree
-    mapSb: *StringBuilder = alloc(sb_new())
-    optsSb: *StringBuilder = alloc(sb_new())
-    inherited: *Vector<string> = alloc(vec_new())
-    completionWalk(rootc, "", inherited, mapSb, optsSb)
+// Appends the positional candidates of the leaf, its children while no positional was typed, its validArgs and whatever its validArgs func offers
+func completionArgLines(out: *Vector<string>, cctx: *Context, st: *ParseState, toComplete: string) -> int64 {
+    // The leaf and the positionals pass 2 collected
+    leaf: *Command = (*cctx).cmd
+    pos: *Vector<string> = (*st).pos
 
-    // The function head
+    // Whether a static list was given at all
+    mut static: bool = false
+
+    // The children, only while the word being completed is the first positional
+    if vec_len(pos) == 0 {
+        if completionKidLines(out, leaf) > 0 {
+            static = true
+        }
+    }
+
+    // The words the command declares as valid positionals
+    valid: *Vector<string> = (*leaf).validArgs
+    mut v: int64 = 0
+    while v < vec_len(valid) {
+        completionPushCand(out, vec_get(valid, v), "")
+        static = true
+        v = v + 1
+    }
+
+    // Whatever the command's own func offers
+    if (*leaf).hasValidArgsFunc {
+        // The func, read out of the field before it is called
+        fn := (*leaf).validArgsFunc
+
+        // The candidates and the directive it wants
+        raw, dir := fn(cctx, toComplete)
+
+        // The vector as an owned one, since a tuple from an indirect call carries no element type
+        got: *Vector<string> = completionTake(raw)
+
+        // Loop over the candidates it gave
+        mut i: int64 = 0
+        while i < vec_len(got) {
+            completionPushCand(out, vec_get(got, i), "")
+            i = i + 1
+        }
+
+        // Free the vector, the strings inside it are the command's own and stay
+        vec_free(got)
+        free(got)
+
+        // A static list still wins over what the func asked for
+        if static {
+            return compNoFileComp()
+        }
+        return dir
+    }
+
+    // A static list means the shell must not add file names
+    if static {
+        return compNoFileComp()
+    }
+
+    // Nothing was offered so the shell may complete files
+    return compDefault()
+}
+
+// Checks if one of the words typed so far is the bare "--" that ends the flags
+func completionSawTerm(st: *ParseState) -> bool {
+    // The words typed before the one being completed
+    words: *Vector<string> = (*st).words
+
+    // Loop over them looking for the terminator
+    mut i: int64 = 0
+    while i < vec_len(words) {
+        // A word that is exactly two dashes ends the flags
+        if vec_get(words, i) == "--" {
+            return true
+        }
+        i = i + 1
+    }
+
+    // No terminator was typed
+    return false
+}
+
+// Gathers the candidate lines for one request and gives the directive that goes with them
+func completionCandidates(out: *Vector<string>, cctx: *Context, st: *ParseState, toComplete: string) -> int64 {
+    // The chain and the command the words named
+    chain: *Vector<*Command> = (*cctx).chain
+    leaf: *Command = (*cctx).cmd
+
+    // A command that parses no flags of its own, and a line whose flags a "--" already ended, only ever complete positionals
+    if !(*leaf).disableFlagParsing && !completionSawTerm(st) {
+        // A word starting with a dash and carrying no "=" is a flag name
+        if starts_with(toComplete, "-") && !str_contains(toComplete, "=") {
+            completionFlagLines(out, chain, leaf)
+            return compNoFileComp()
+        }
+
+        // A "--name=" or "-n=" token is a flag value with its name carried along
+        if starts_with(toComplete, "-") && str_contains(toComplete, "=") {
+            return completionEqValues(out, cctx, chain, toComplete)
+        }
+
+        // The word before may be a flag still waiting for its value
+        fset, idx, found := completionValueFlag(st, chain)
+        if found {
+            f: *Flag = fset.get(idx)
+            if flagTakesValue(f) {
+                return completionFlagValues(out, cctx, chain, f, "", toComplete)
+            }
+        }
+    }
+
+    // Anything else completes a positional of the command the words named
+    return completionArgLines(out, cctx, st, toComplete)
+}
+
+// Writes the candidate lines and the directive line to the out sink, dropping the descriptions when the shell cannot show them
+func completionWriteLines(ctx: *Context, out: *Vector<string>, directive: int64, noDesc: bool) -> void {
+    // Loop over the candidates in the order they were gathered
+    mut i: int64 = 0
+    while i < vec_len(out) {
+        // The current line
+        line: string = vec_get(out, i)
+
+        // The whole line stands unless something below cuts it short
+        mut end: int64 = str_len(line)
+
+        // The tab the description hangs off, or -1 when the line carries none
+        t: int64 = str_find(line, "\t")
+
+        // Drop the description when the shell cannot show one
+        if noDesc && t >= 0 {
+            end = t
+        }
+
+        // A newline inside a name or a description would read as another candidate, so the line stops at the first one
+        nl: int64 = str_find(line, "\n")
+        if nl >= 0 && nl < end {
+            end = nl
+        }
+
+        // Print the line, or the piece of it that is left when something cut it
+        if end < str_len(line) {
+            cut: string = substring(line, 0, end)
+            ctx.println(cut)
+            free(cut)
+        } else {
+            ctx.println(line)
+        }
+        i = i + 1
+    }
+
+    // The directive on the last line
+    d: string = int_to_string(directive)
+    line2: string = ":" + d
+    ctx.println(line2)
+    free(line2)
+    free(d)
+}
+
+// The handler of the hidden __complete commands, it prints the candidates for the words the shell handed over
+func completionEmit(ctx: *Context, noDesc: bool) -> int32 {
+    // The words the shell handed over, the last one being the text to complete
+    n: int64 = ctx.nargs()
+
+    // Everything before the last word, which pass 1 walks
+    words: *Vector<string> = alloc(vec_new())
+
+    // The text being completed, empty when the shell sent nothing at all
+    mut toComplete: string = ""
+
+    // Loop over the words the handler was given
+    mut i: int64 = 0
+    while i < n {
+        // The last one is the text to complete and the rest are the line so far
+        if i == n - 1 {
+            toComplete = ctx.arg(i)
+        } else {
+            vec_push(words, ctx.arg(i))
+        }
+        i = i + 1
+    }
+
+    // A scanner over those words, which never walks into the hidden builtins driving it
+    rootc: *Command = (*ctx).root
+    st: *ParseState = parseStateNewFromVector(rootc, (*ctx).argv, words)
+    (*st).skipHidden = true
+
+    // Pass 1 finds the command the words name
+    parseFind(st)
+
+    // Pass 2 sets the flags it can, a half typed line breaks it and that is fine
+    perr: error = parseAll(st)
+    if perr.exists() {
+        // Free the message nobody reads, since the request answers with candidates either way
+        free(perr.message)
+    }
+
+    // The command the words named and the chain down to it
+    chain: *Vector<*Command> = (*st).chain
+    leaf: *Command = parseCur(st)
+    pos: *Vector<string> = (*st).pos
+
+    // The context a completion func is handed, naming that command and the words parsed so far
+    cctx: *Context = alloc(Context { cmd: leaf, root: rootc, chain: chain, args: pos, argv: (*ctx).argv })
+
+    // The candidate lines and the directive that goes with them
+    out: *Vector<string> = alloc(vec_new())
+    directive: int64 = completionCandidates(out, cctx, st, toComplete)
+
+    // Write them through the sinks of the command that was actually run
+    completionWriteLines(ctx, out, directive, noDesc)
+
+    // Free the lines, the vector and the context
+    textFreeStrings(out)
+    vec_free(out)
+    free(out)
+    free(cctx)
+
+    // Free the scanner, which owns the word vector
+    parseStateFree(st)
+    free(st)
+
+    // A completion request always succeeds
+    return 0
+}
+
+// The handler of __complete, the form whose candidates carry their descriptions
+func completionRunDesc(ctx: *Context) -> int32 {
+    // Print the candidates as they are
+    return completionEmit(ctx, false)
+}
+
+// The handler of __completeNoDesc, the form whose candidates are names alone
+func completionRunNoDesc(ctx: *Context) -> int32 {
+    // Print the candidates with the descriptions cut off
+    return completionEmit(ctx, true)
+}
+
+/**
+ * completionHiddenCommandNew
+ * Builds one of the hidden commands a generated script calls back into, __complete or __completeNoDesc
+ * @param noDesc = false {bool} - true for the form that prints names without their descriptions
+ * @return the new command
+ **/
+export func completionHiddenCommandNew(noDesc: bool) -> *Command {
+    // The use line and the short of the form asked for
+    mut use: string = "__complete [command...]"
+    mut short: string = "Request shell completion choices for the given command line"
+    if noDesc {
+        use = "__completeNoDesc [command...]"
+        short = "Request shell completion choices with no descriptions"
+    }
+
+    // The command under the name the scripts call
+    c: *Command = cmdNew(use, short)
+
+    // Keep it out of every listing
+    c.setHidden(true)
+
+    // Every word reaches the handler raw, half typed flags and all
+    c.setDisableFlagParsing(true)
+
+    // The handler of the form asked for
+    if noDesc {
+        c.setRun(completionRunNoDesc)
+    } else {
+        c.setRun(completionRunDesc)
+    }
+
+    // Mark it builtin so inherited required flags and groups skip it
+    (*c).isBuiltin = true
+    return c
+}
+
+// Appends the header comment every generated script opens with, install being the line that loads it
+func completionPushHeader(sb: *StringBuilder, app: string, shell: string, install: string) -> void {
+    sb_push(sb, "# ")
+    sb_push(sb, shell)
+    sb_push(sb, " completion for ")
+    sb_push(sb, app)
+    sb_push(sb, "\n")
+    sb_push(sb, "#\n")
+    sb_push(sb, "# Generated by nova. Every candidate comes from the program itself, so the\n")
+    sb_push(sb, "# script keeps working when the commands or the flags change.\n")
+    sb_push(sb, "#\n")
+    sb_push(sb, "#   ")
+    sb_push(sb, install)
+    sb_push(sb, "\n")
+    sb_push(sb, "\n")
+}
+
+// Copies the finished text out of a builder, whose owner frees it after
+func completionText(sb: *StringBuilder) -> string {
+    // The finished text
+    return substring(sb_cstr(sb), 0, sb_size(sb))
+}
+
+/**
+ * completionBashScript
+ * Builds the bash completion script for an application, it needs nothing but bash itself and calls the program for every candidate
+ * @param app {string} - the application name, borrowed
+ * @return a fresh heap string ending in a newline
+ **/
+export func completionBashScript(app: string) -> string {
+    // The function name and a builder
+    fname: string = completionFuncName(app)
+    sb: *StringBuilder = alloc(sb_new())
+
+    // The header comment and the line that loads the script
+    install: string = textCat3("source <(", app, " completion bash)")
+    completionPushHeader(sb, app, "bash", install)
+    free(install)
+
+    // The function head and the reply it starts from
     sb_push(sb, fname)
     sb_push(sb, "()\n")
     sb_push(sb, "{\n")
-    sb_push(sb, "    local cur cmd word opts i\n")
+    sb_push(sb, "    local cur out lastline directive merged words i w last c pfx tail IFS\n")
     sb_push(sb, "    COMPREPLY=()\n")
-    sb_push(sb, "    cur=\"${COMP_WORDS[COMP_CWORD]}\"\n")
-    sb_push(sb, "    cmd=\"\"\n")
-    sb_push(sb, "    i=1\n")
+    sb_push(sb, "\n")
 
-    // The loop that walks the words typed so far through the word table
-    sb_push(sb, "    while [ \"$i\" -lt \"$COMP_CWORD\" ]; do\n")
-    sb_push(sb, "        word=\"${COMP_WORDS[$i]}\"\n")
-    sb_push(sb, "        i=$((i + 1))\n")
-    sb_push(sb, "        case \"$word\" in\n")
-    sb_push(sb, "            -*) continue ;;\n")
-    sb_push(sb, "        esac\n")
-    sb_push(sb, "        case \"$cmd|$word\" in\n")
-    sb_push(sb, sb_cstr(mapSb))
-    sb_push(sb, "            *) continue ;;\n")
-    sb_push(sb, "        esac\n")
+    // The word rebuild, since bash breaks a word on "=" and ":" of its own accord
+    sb_push(sb, "    # Glue back what COMP_WORDBREAKS split on \"=\" and \":\"\n")
+    sb_push(sb, "    merged=()\n")
+    sb_push(sb, "    i=0\n")
+    sb_push(sb, "    while [ \"$i\" -le \"$COMP_CWORD\" ]; do\n")
+    sb_push(sb, "        w=\"${COMP_WORDS[$i]}\"\n")
+    sb_push(sb, "        last=$(( ${#merged[@]} - 1 ))\n")
+    sb_push(sb, "        if [ \"$last\" -ge 0 ] && { [ \"$w\" = \"=\" ] || [ \"$w\" = \":\" ]; }; then\n")
+    sb_push(sb, "            merged[$last]=\"${merged[$last]}$w\"\n")
+    sb_push(sb, "        elif [ \"$last\" -ge 0 ] && { [ \"${merged[$last]: -1}\" = \"=\" ] || [ \"${merged[$last]: -1}\" = \":\" ]; }; then\n")
+    sb_push(sb, "            merged[$last]=\"${merged[$last]}$w\"\n")
+    sb_push(sb, "        else\n")
+    sb_push(sb, "            merged+=(\"$w\")\n")
+    sb_push(sb, "        fi\n")
+    sb_push(sb, "        i=$(( i + 1 ))\n")
     sb_push(sb, "    done\n")
+    sb_push(sb, "\n")
 
-    // The candidate lookup and the reply
-    sb_push(sb, "    opts=\"\"\n")
-    sb_push(sb, "    case \"$cmd\" in\n")
-    sb_push(sb, sb_cstr(optsSb))
+    // The word being completed and the ones before it
+    sb_push(sb, "    # The word being completed and the line before it\n")
+    sb_push(sb, "    last=$(( ${#merged[@]} - 1 ))\n")
+    sb_push(sb, "    cur=\"${merged[$last]}\"\n")
+    sb_push(sb, "    words=()\n")
+    sb_push(sb, "    if [ \"$last\" -gt 1 ]; then\n")
+    sb_push(sb, "        words=(\"${merged[@]:1:last-1}\")\n")
+    sb_push(sb, "    fi\n")
+    sb_push(sb, "\n")
+
+    // The call back into the program
+    sb_push(sb, "    # Ask the program itself for the candidates\n")
+    sb_push(sb, "    out=\"$(\"${merged[0]}\" __completeNoDesc ${words[@]+\"${words[@]}\"} \"$cur\" 2>/dev/null)\"\n");
+    sb_push(sb, "\n")
+
+    // The directive on the last line
+    sb_push(sb, "    # The last line is the directive and the rest are candidates\n")
+    sb_push(sb, "    lastline=\"${out##*$'\\n'}\"\n")
+    sb_push(sb, "    if [ \"$lastline\" = \"$out\" ]; then\n")
+    sb_push(sb, "        out=\"\"\n")
+    sb_push(sb, "    else\n")
+    sb_push(sb, "        out=\"${out%$'\\n'*}\"\n")
+    sb_push(sb, "    fi\n")
+    sb_push(sb, "    case \"$lastline\" in\n")
+    sb_push(sb, "        :[0-9]*) directive=\"${lastline#:}\" ;;\n")
+    sb_push(sb, "        *) directive=0 ;;\n")
     sb_push(sb, "    esac\n")
-    sb_push(sb, "    COMPREPLY=( $(compgen -W \"$opts\" -- \"$cur\") )\n")
-    sb_push(sb, "    return 0\n")
+    sb_push(sb, "\n")
+
+    // The error bit
+    sb_push(sb, "    # The error bit means the program had nothing to say\n")
+    sb_push(sb, "    if [ $(( directive & 1 )) -ne 0 ]; then\n")
+    sb_push(sb, "        return 1\n")
+    sb_push(sb, "    fi\n")
+    sb_push(sb, "\n")
+
+    // The other two bits, both through compopt when the shell has it
+    sb_push(sb, "    # File names and the trailing space, both only where compopt exists\n")
+    sb_push(sb, "    if type compopt > /dev/null 2>&1; then\n")
+    sb_push(sb, "        if [ $(( directive & 4 )) -ne 0 ]; then\n")
+    sb_push(sb, "            compopt +o default\n")
+    sb_push(sb, "        else\n")
+    sb_push(sb, "            compopt -o default\n")
+    sb_push(sb, "        fi\n")
+    sb_push(sb, "        if [ $(( directive & 2 )) -ne 0 ]; then\n")
+    sb_push(sb, "            compopt -o nospace\n")
+    sb_push(sb, "        fi\n")
+    sb_push(sb, "    fi\n")
+    sb_push(sb, "\n")
+
+    // The reply itself
+    sb_push(sb, "    # Keep the candidates the word being completed starts\n")
+    sb_push(sb, "    IFS=$'\\n'\n")
+    sb_push(sb, "    COMPREPLY=( $(compgen -W \"$out\" -- \"$cur\") )\n")
+    sb_push(sb, "\n")
+
+    // The prefix readline already has, which the reply must not carry a second time
+    sb_push(sb, "    # Cut what COMP_WORDBREAKS took off the front, readline replaces its own word alone\n")
+    sb_push(sb, "    for c in '=' ':'; do\n")
+    sb_push(sb, "        if [[ \"$cur\" != *\"$c\"* || \"$COMP_WORDBREAKS\" != *\"$c\"* ]]; then\n")
+    sb_push(sb, "            continue\n")
+    sb_push(sb, "        fi\n")
+    sb_push(sb, "        tail=${cur##*$c}\n")
+    sb_push(sb, "        pfx=${cur%\"$tail\"}\n")
+    sb_push(sb, "        i=0\n")
+    sb_push(sb, "        while [ \"$i\" -lt \"${#COMPREPLY[@]}\" ]; do\n")
+    sb_push(sb, "            COMPREPLY[$i]=${COMPREPLY[$i]#\"$pfx\"}\n")
+    sb_push(sb, "            i=$(( i + 1 ))\n")
+    sb_push(sb, "        done\n")
+    sb_push(sb, "    done\n")
     sb_push(sb, "}\n")
+    sb_push(sb, "\n")
 
-    // Free the table builders
-    sb_free(mapSb)
-    free(mapSb)
-    sb_free(optsSb)
-    free(optsSb)
-}
-
-// Appends the complete -o default -F <fname> <app> line
-func completionPushRegister(sb: *StringBuilder, app: string, fname: string) -> void {
+    // The registration
     sb_push(sb, "complete -o default -F ")
     sb_push(sb, fname)
     sb_push(sb, " ")
     sb_push(sb, app)
     sb_push(sb, "\n")
-}
-
-/**
- * completionBashScript
- * Builds the bash completion script for the tree under rootc, a header comment, the function and the complete registration
- * @param rootc {*Command} - the root command, paths already fixed up by novaExecute
- * @param app {string} - the application name, borrowed
- * @return a fresh heap string ending in a newline
- **/
-export func completionBashScript(rootc: *Command, app: string) -> string {
-    // The function name and a builder
-    fname: string = completionFuncName(app)
-    sb: *StringBuilder = alloc(sb_new())
-
-    // The header comment
-    sb_push(sb, "# bash completion for ")
-    sb_push(sb, app)
-    sb_push(sb, "\n")
-    sb_push(sb, "#\n")
-    sb_push(sb, "# Generated by nova. The command tree is baked in, so regenerate the\n")
-    sb_push(sb, "# script whenever the commands or flags change.\n")
-    sb_push(sb, "#\n")
-    sb_push(sb, "#   source <(")
-    sb_push(sb, app)
-    sb_push(sb, " completion bash)\n")
-    sb_push(sb, "\n")
-
-    // The function and the registration
-    completionPushBashFunc(sb, rootc, fname)
-    sb_push(sb, "\n")
-    completionPushRegister(sb, app, fname)
 
     // Copy the text out and free the builder
-    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    out: string = completionText(sb)
     sb_free(sb)
     free(sb)
     free(fname)
@@ -338,46 +861,178 @@ export func completionBashScript(rootc: *Command, app: string) -> string {
 
 /**
  * completionZshScript
- * Builds the zsh completion script for the tree under rootc, it turns on bashcompinit and reuses the bash function
- * @param rootc {*Command} - the root command, paths already fixed up by novaExecute
+ * Builds the zsh completion script for an application, it feeds _describe with what the program hands back
  * @param app {string} - the application name, borrowed
+ * @param noDesc = false {bool} - true to call __completeNoDesc so no candidate carries a description
  * @return a fresh heap string ending in a newline
  **/
-export func completionZshScript(rootc: *Command, app: string) -> string {
-    // The function name and a builder
-    fname: string = completionFuncName(app)
+export func completionZshScript(app: string, noDesc: bool) -> string {
+    // The ident the function is named after and a builder
+    id: string = completionIdent(app)
     sb: *StringBuilder = alloc(sb_new())
 
-    // The header comment
+    // The compdef line every zsh completion opens with
     sb_push(sb, "#compdef ")
     sb_push(sb, app)
     sb_push(sb, "\n")
-    sb_push(sb, "#\n")
-    sb_push(sb, "# zsh completion for ")
-    sb_push(sb, app)
-    sb_push(sb, ", generated by nova. It reuses the bash\n")
-    sb_push(sb, "# completion function: bashcompinit provides compgen and complete under\n")
-    sb_push(sb, "# zsh, and complete registers the function with compdef for us.\n")
-    sb_push(sb, "#\n")
-    sb_push(sb, "#   source <(")
-    sb_push(sb, app)
-    sb_push(sb, " completion zsh)\n")
+    install: string = textCat3("source <(", app, " completion zsh)")
+    completionPushHeader(sb, app, "zsh", install)
+    free(install)
+
+    // The function head
+    sb_push(sb, "_")
+    sb_push(sb, id)
+    sb_push(sb, "()\n")
+    sb_push(sb, "{\n")
+    sb_push(sb, "    local out line comp directive\n")
+    sb_push(sb, "    local -a candidates args opts\n")
     sb_push(sb, "\n")
 
-    // Turn on bashcompinit
-    sb_push(sb, "autoload -U +X bashcompinit && bashcompinit\n")
+    // The words before the one being completed
+    sb_push(sb, "    # The line so far with the program name dropped\n")
+    sb_push(sb, "    args=(\"${(@)words[2,CURRENT-1]}\")\n")
     sb_push(sb, "\n")
 
-    // The function and the registration
-    completionPushBashFunc(sb, rootc, fname)
+    // The call back into the program
+    sb_push(sb, "    # Ask the program itself for the candidates\n")
+    sb_push(sb, "    out=$(${words[1]} ")
+    if noDesc {
+        sb_push(sb, "__completeNoDesc")
+    } else {
+        sb_push(sb, "__complete")
+    }
+    sb_push(sb, " \"${args[@]}\" \"${words[CURRENT]}\" 2>/dev/null)\n")
     sb_push(sb, "\n")
-    completionPushRegister(sb, app, fname)
+
+    // The split into candidates and the directive
+    sb_push(sb, "    # The last line is the directive and the rest are candidates\n")
+    sb_push(sb, "    directive=0\n")
+    sb_push(sb, "    for line in ${(f)out}; do\n")
+    sb_push(sb, "        if [[ ${line} == :[0-9]* ]]; then\n")
+    sb_push(sb, "            directive=${line#:}\n")
+    sb_push(sb, "        else\n")
+    sb_push(sb, "            comp=${line//:/\\\\:}\n")
+    sb_push(sb, "            comp=${comp/$'\\t'/:}\n")
+    sb_push(sb, "            candidates+=(${comp})\n")
+    sb_push(sb, "        fi\n")
+    sb_push(sb, "    done\n")
+    sb_push(sb, "\n")
+
+    // The error bit
+    sb_push(sb, "    # The error bit means the program had nothing to say\n")
+    sb_push(sb, "    if (( (directive & 1) != 0 )); then\n")
+    sb_push(sb, "        return 1\n")
+    sb_push(sb, "    fi\n")
+    sb_push(sb, "\n")
+
+    // The no space bit
+    sb_push(sb, "    # No space after a candidate when the no space bit is set\n")
+    sb_push(sb, "    if (( (directive & 2) != 0 )); then\n")
+    sb_push(sb, "        opts+=(-S '')\n")
+    sb_push(sb, "    fi\n")
+    sb_push(sb, "\n")
+
+    // The reply itself
+    sb_push(sb, "    # The candidates, or file names when the program left that to the shell\n")
+    sb_push(sb, "    if (( ${#candidates[@]} > 0 )); then\n")
+    sb_push(sb, "        _describe -t ")
+    sb_push(sb, id)
+    sb_push(sb, " '")
+    sb_push(sb, app)
+    sb_push(sb, "' candidates \"${opts[@]}\"\n")
+    sb_push(sb, "    elif (( (directive & 4) == 0 )); then\n")
+    sb_push(sb, "        _files\n")
+    sb_push(sb, "    fi\n")
+    sb_push(sb, "}\n")
+    sb_push(sb, "\n")
+
+    // The registration
+    sb_push(sb, "compdef _")
+    sb_push(sb, id)
+    sb_push(sb, " ")
+    sb_push(sb, app)
+    sb_push(sb, "\n")
 
     // Copy the text out and free the builder
-    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    out: string = completionText(sb)
     sb_free(sb)
     free(sb)
-    free(fname)
+    free(id)
+    return out
+}
+
+/**
+ * completionFishScript
+ * Builds the fish completion script for an application, fish reads the same name and tab description lines the program prints
+ * @param app {string} - the application name, borrowed
+ * @param noDesc = false {bool} - true to call __completeNoDesc so no candidate carries a description
+ * @return a fresh heap string ending in a newline
+ **/
+export func completionFishScript(app: string, noDesc: bool) -> string {
+    // The ident the function is named after and a builder
+    id: string = completionIdent(app)
+    sb: *StringBuilder = alloc(sb_new())
+
+    // The header comment and the line that loads the script, which fish pipes rather than sources
+    install: string = app + " completion fish | source"
+    completionPushHeader(sb, app, "fish", install)
+    free(install)
+
+    // The function head
+    sb_push(sb, "function __")
+    sb_push(sb, id)
+    sb_push(sb, "_perform_completion\n")
+
+    // The words before the one being completed and the word itself
+    sb_push(sb, "    # The line so far and the word being completed\n")
+    sb_push(sb, "    set -l args (commandline -opc)\n")
+    sb_push(sb, "    set -l tok (commandline -ct)\n")
+    sb_push(sb, "\n")
+
+    // The call back into the program
+    sb_push(sb, "    # Ask the program itself for the candidates\n")
+    sb_push(sb, "    set -l out ($args[1] ")
+    if noDesc {
+        sb_push(sb, "__completeNoDesc")
+    } else {
+        sb_push(sb, "__complete")
+    }
+    sb_push(sb, " $args[2..-1] \"$tok\" 2>/dev/null)\n")
+    sb_push(sb, "    set -l n (count $out)\n")
+    sb_push(sb, "    if test $n -eq 0\n")
+    sb_push(sb, "        return\n")
+    sb_push(sb, "    end\n")
+    sb_push(sb, "\n")
+
+    // The directive on the last line
+    sb_push(sb, "    # The last line is the directive and the rest are candidates\n")
+    sb_push(sb, "    set -l directive (string replace ':' '' -- $out[$n])\n")
+    sb_push(sb, "    set -e out[$n]\n")
+    sb_push(sb, "    for line in $out\n")
+    sb_push(sb, "        printf '%s\\n' $line\n")
+    sb_push(sb, "    end\n")
+    sb_push(sb, "\n")
+
+    // The file names, which the four directives carrying the no file comp bit turn off
+    sb_push(sb, "    # File names unless the program set the no file completion bit\n")
+    sb_push(sb, "    if not contains -- $directive 4 5 6 7\n")
+    sb_push(sb, "        __fish_complete_path \"$tok\"\n")
+    sb_push(sb, "    end\n")
+    sb_push(sb, "end\n")
+    sb_push(sb, "\n")
+
+    // The registration
+    sb_push(sb, "complete -c ")
+    sb_push(sb, app)
+    sb_push(sb, " -f -a '(__")
+    sb_push(sb, id)
+    sb_push(sb, "_perform_completion)'\n")
+
+    // Copy the text out and free the builder
+    out: string = completionText(sb)
+    sb_free(sb)
+    free(sb)
+    free(id)
     return out
 }
 
@@ -388,9 +1043,12 @@ func completionRun(ctx: *Context) -> int32 {
     rootc: *Command = (*ctx).root
     app: string = (*rootc).name
 
-    // The bash script
+    // Whether the script asks for candidates without descriptions
+    noDesc: bool = ctx.getBool("no-descriptions")
+
+    // The bash script, which always asks for names alone since bash shows nothing else
     if shell == "bash" {
-        bs: string = completionBashScript(rootc, app)
+        bs: string = completionBashScript(app)
         ctx.print(bs)
         free(bs)
         return 0
@@ -398,33 +1056,80 @@ func completionRun(ctx: *Context) -> int32 {
 
     // The zsh script
     if shell == "zsh" {
-        zs: string = completionZshScript(rootc, app)
+        zs: string = completionZshScript(app, noDesc)
         ctx.print(zs)
         free(zs)
         return 0
     }
 
+    // The fish script
+    if shell == "fish" {
+        fs: string = completionFishScript(app, noDesc)
+        ctx.print(fs)
+        free(fs)
+        return 0
+    }
+
     // Anything else is an error
-    return ctx.fail("unsupported shell \"" + shell + "\"")
+    msg: string = textCat3("unsupported shell \"", shell, "\"")
+    code: int32 = ctx.fail(msg)
+
+    // Free the message the report already wrote
+    free(msg)
+    return code
 }
 
 /**
  * completionCommandNew
- * Builds the builtin completion [bash|zsh] command novaExecute adds to a root with subcommands
+ * Builds the builtin completion [bash|zsh|fish] command novaExecute adds to a root with subcommands
  * @param appName {string} - the root command's name, used in the long description
  * @return the new command
  **/
 export func completionCommandNew(appName: string) -> *Command {
     // The command with its use and short
-    c: *Command = cmdNew("completion [bash|zsh]", "Generate the autocompletion script for the specified shell")
+    c: *Command = cmdNew("completion [bash|zsh|fish]", "Generate the autocompletion script for the specified shell")
 
-    // The long description
-    c.setLong("Generate the autocompletion script for " + appName + " for the specified shell.\n\nThe script is self-contained: the command tree is baked into it when it is\ngenerated, so regenerate it whenever the commands change.\n\nbash:\n  source <(" + appName + " completion bash)\n  " + appName + " completion bash > /etc/bash_completion.d/" + appName + "\n\nzsh:\n  The zsh script reuses the bash function through bashcompinit.\n  source <(" + appName + " completion zsh)\n  " + appName + " completion zsh > \"${fpath[1]}/_" + appName + "\"")
+    // A builder for the long description, which names the application eleven times over and would leave a halfway string behind at every one of them
+    sb: *StringBuilder = alloc(sb_new())
+    sb_push(sb, "Generate the autocompletion script for ")
+    sb_push(sb, appName)
+    sb_push(sb, " for the specified shell.\n\nThe script calls ")
+    sb_push(sb, appName)
+    sb_push(sb, " itself for every candidate, so it keeps\nworking when the commands change and never needs regenerating.\n\nbash:\n  source <(")
+    sb_push(sb, appName)
+    sb_push(sb, " completion bash)\n  ")
+    sb_push(sb, appName)
+    sb_push(sb, " completion bash > /etc/bash_completion.d/")
+    sb_push(sb, appName)
+    sb_push(sb, "\n\nzsh:\n  source <(")
+    sb_push(sb, appName)
+    sb_push(sb, " completion zsh)\n  ")
+    sb_push(sb, appName)
+    sb_push(sb, " completion zsh > \"${fpath[1]}/_")
+    sb_push(sb, appName)
+    sb_push(sb, "\"\n\nfish:\n  ")
+    sb_push(sb, appName)
+    sb_push(sb, " completion fish | source\n  ")
+    sb_push(sb, appName)
+    sb_push(sb, " completion fish > ~/.config/fish/completions/")
+    sb_push(sb, appName)
+    sb_push(sb, ".fish")
 
-    // One positional, the shell name, with bash and zsh as the valid args
+    // The long description as one owned string, which the tree frees along with the command
+    long: string = completionText(sb)
+    sb_free(sb)
+    free(sb)
+    c.setLong(long)
+    (*c).longOwned = true
+
+    // One positional, the shell name, with the three shells as the valid args
     c.setArgs(argsExact(1))
     c.addValidArg("bash")
     c.addValidArg("zsh")
+    c.addValidArg("fish")
+
+    // Whether the script asks for candidates without their descriptions
+    c.localFlags().addBool("no-descriptions", "", false, "disable completion descriptions")
 
     // The handler
     c.setRun(completionRun)

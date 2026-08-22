@@ -4,9 +4,25 @@ serve: port=1 host=example.org verbose=true nargs=0
 == app serve -p 1 --host=example.org -v -> 0
 app version 0.1.0
 == app --version -> 0
-root kids=5 root flags=1 root pflags=2
+root kids=7 root flags=1 root pflags=2
 root groups=1 serve groups=2
 freed ok: executed tree
 fresh kids=3
 freed ok: never executed tree
 freed ok: bare root
+## per call leak
+bare root: 0
+tree with kids: 0
+--help: 0
+--version: 0
+flag error: 0
+unknown command: 0
+required error: 0
+group error: 0
+args error: 0
+RunE error: 0
+completion bash: 0
+__complete empty: 0
+env run: 0
+config+env run: 1
+build and free a tree: 0

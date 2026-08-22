@@ -16,8 +16,18 @@
 @import context
 
 /**
+ * FlagCompFunc
+ * One completion func registered for one flag of a command, the name is the flag's long name and the func is called with the words parsed so far and the text being completed
+ **/
+export struct FlagCompFunc {
+    name: string,
+    f: (*Context, string) -> (*Vector<string>, int64),
+}
+
+/**
  * Command
  * One node of the CLI tree, every string is borrowed from a caller literal or argv, a command with no handler holds cmdNoop and the matching has flag is false, the E hooks and the help and usage funcs are held the same way and the two sinks start as Inherit so a command writes wherever its parent does
+ * Three strings are the exception and are owned by the command itself, the name cmdNew cuts out of the use line, the path the executor rebuilds on every call for every node below the root, and the message of the last error nova itself reported, which the error novaExecuteE hands back points at until the next call or novaFreeTree
  **/
 export struct Command {
     use: string,
@@ -33,8 +43,19 @@ export struct Command {
     pflags: *FlagSet,
     kids: *Vector<*Command>,
     path: string,
+    pathOwned: bool,
+    longOwned: bool,
+    hasParent: bool,
+    envPrefix: string,
+    configFile: string,
+    configFlag: string,
+    errMsg: string,
+    hasErrMsg: bool,
     args: ArgSpec,
     validArgs: *Vector<string>,
+    hasValidArgsFunc: bool,
+    validArgsFunc: (*Context, string) -> (*Vector<string>, int64),
+    compFuncs: *Vector<*FlagCompFunc>,
     groups: *Vector<*FlagGroup>,
     hasRun: bool,
     run: (*Context) -> int32,
@@ -94,6 +115,21 @@ export func cmdNoopE(ctx: *Context) -> error {
 }
 
 /**
+ * cmdNoopComp
+ * The placeholder every unset completion func field holds, it offers nothing and lets the shell complete files
+ * @param ctx {*Context} - ignored
+ * @param toComplete {string} - ignored
+ * @return an empty candidate list and the zero directive
+ **/
+export func cmdNoopComp(ctx: *Context, toComplete: string) -> (*Vector<string>, int64) {
+    // The empty candidate list nova frees like any other
+    v: *Vector<string> = alloc(vec_new())
+
+    // Return it with the directive that asks for nothing
+    return (v, 0)
+}
+
+/**
  * cmdNoopPrint
  * The placeholder every unset help and usage func field holds, the resolved default is used instead of it
  * @param ctx {*Context} - ignored
@@ -131,10 +167,11 @@ export func cmdNameOf(use: string) -> string {
  * @return a pointer to the new command
  **/
 export func cmdNew(use: string, short: string) -> *Command {
-    // The empty alias, child, valid arg and flag group vectors
+    // The empty alias, child, valid arg, completion func and flag group vectors
     aliases: *Vector<string> = alloc(vec_new())
     kids: *Vector<*Command> = alloc(vec_new())
     valid: *Vector<string> = alloc(vec_new())
+    comps: *Vector<*FlagCompFunc> = alloc(vec_new())
     groups: *Vector<*FlagGroup> = alloc(vec_new())
 
     // The name from the use line
@@ -145,7 +182,12 @@ export func cmdNew(use: string, short: string) -> *Command {
         use: use, name: name, short: short, long: "", example: "", version: "",
         aliases: aliases, hidden: false, deprecated: "",
         flags: flagsetNew(), pflags: flagsetNew(), kids: kids,
-        path: name, args: argsAny(), validArgs: valid, groups: groups,
+        path: name, pathOwned: false, longOwned: false, hasParent: false,
+        envPrefix: "", configFile: "", configFlag: "",
+        errMsg: "", hasErrMsg: false,
+        args: argsAny(), validArgs: valid,
+        hasValidArgsFunc: false, validArgsFunc: cmdNoopComp, compFuncs: comps,
+        groups: groups,
         hasRun: false, run: cmdNoop,
         hasPre: false, preRun: cmdNoop,
         hasPost: false, postRun: cmdNoop,
@@ -209,6 +251,29 @@ export func cmdVisibleKids(c: *Command) -> *Vector<*Command> {
 
     // Return the sorted vector
     return shown
+}
+
+/**
+ * cmdFindFlagComp
+ * Finds the completion func a command registered for a flag by its long name
+ * @param comps {*Vector<*FlagCompFunc>} - the command's compFuncs registry, borrowed
+ * @param name {string} - the long name without dashes
+ * @return the index in the registry, or -1 when nothing is registered for that name
+ **/
+export func cmdFindFlagComp(comps: *Vector<*FlagCompFunc>, name: string) -> int64 {
+    // Loop over the entries in registration order
+    mut i: int64 = 0
+    while i < vec_len(comps) {
+        // Return the index on a name match
+        e: *FlagCompFunc = vec_get(comps, i)
+        if (*e).name == name {
+            return i
+        }
+        i = i + 1
+    }
+
+    // Nothing registered for that name
+    return -1
 }
 
 /**
@@ -319,6 +384,61 @@ export func cmdResolveWrapWidth(chain: *Vector<*Command>) -> int64 {
     return 0
 }
 
+// The shared walk behind the three chain resolvers that look for a string, the nearest non empty one from the leaf up
+func cmdResolveString(chain: *Vector<*Command>, which: int64) -> string {
+    // Walk the chain from the leaf up to the root
+    mut i: int64 = vec_len(chain) - 1
+    while i >= 0 {
+        // The current command
+        c: *Command = vec_get(chain, i)
+
+        // The setting asked for
+        v: string = if which == 0 { (*c).envPrefix } else if which == 1 { (*c).configFile } else { (*c).configFlag }
+
+        // Return the first one that is set
+        if v != "" {
+            return v
+        }
+        i = i - 1
+    }
+
+    // Nothing on the chain sets one
+    return ""
+}
+
+/**
+ * cmdResolveEnvPrefix
+ * Gives the prefix the environment variables of a chain are named after, the nearest non empty one from the leaf up
+ * @param chain {*Vector<*Command>} - the commands root..leaf, borrowed
+ * @return the prefix, or "" when nothing on the chain sets one and only explicit bindings are read
+ **/
+export func cmdResolveEnvPrefix(chain: *Vector<*Command>) -> string {
+    // Walk the chain for the prefix
+    return cmdResolveString(chain, 0)
+}
+
+/**
+ * cmdResolveConfigFile
+ * Gives the config file a chain reads when no flag names one, the nearest non empty one from the leaf up
+ * @param chain {*Vector<*Command>} - the commands root..leaf, borrowed
+ * @return the path, or "" when nothing on the chain sets one
+ **/
+export func cmdResolveConfigFile(chain: *Vector<*Command>) -> string {
+    // Walk the chain for the default path
+    return cmdResolveString(chain, 1)
+}
+
+/**
+ * cmdResolveConfigFlag
+ * Gives the long name of the flag whose value names the config file, the nearest non empty one from the leaf up
+ * @param chain {*Vector<*Command>} - the commands root..leaf, borrowed
+ * @return the flag name, or "" when nothing on the chain sets one
+ **/
+export func cmdResolveConfigFlag(chain: *Vector<*Command>) -> string {
+    // Walk the chain for the flag name
+    return cmdResolveString(chain, 2)
+}
+
 impl Command {
     /**
      * setLong
@@ -412,6 +532,47 @@ impl Command {
 
         // Push the word
         vec_push(valid, a)
+    }
+
+    /**
+     * setValidArgsFunc
+     * Sets the func completion asks for the positional candidates of this command, it is called after the flags on the line are parsed
+     * @param f {(*Context, string) -> (*Vector<string>, int64)} - the func, given a context naming this command and the word being completed, handing back the candidates and a directive
+     * @return nothing
+     **/
+    func setValidArgsFunc(f: (*Context, string) -> (*Vector<string>, int64)) -> void {
+        // Store the func and mark it set
+        self.validArgsFunc = f
+        self.hasValidArgsFunc = true
+    }
+
+    /**
+     * registerFlagCompletionFunc
+     * Sets the func completion asks for the values of one flag, the name must be declared on this command's local or persistent set and may be registered only once
+     * @param name {string} - the long name without dashes
+     * @param f {(*Context, string) -> (*Vector<string>, int64)} - the func, given a context naming this command and the value text so far, handing back the candidates and a directive
+     * @return nothing
+     **/
+    func registerFlagCompletionFunc(name: string, f: (*Context, string) -> (*Vector<string>, int64)) -> void {
+        // The two sets a name may be declared in
+        lf: *FlagSet = self.flags
+        pf: *FlagSet = self.pflags
+
+        // A name neither set declares is a fault
+        if !lf.has(name) && !pf.has(name) {
+            novaFault("no flag named '--", name, "' for the completion func")
+        }
+
+        // The registry of this command
+        comps: *Vector<*FlagCompFunc> = self.compFuncs
+
+        // A second func for the same flag is a fault
+        if cmdFindFlagComp(comps, name) >= 0 {
+            novaFault("flag '--", name, "' already has a completion func")
+        }
+
+        // Push the entry
+        vec_push(comps, alloc(FlagCompFunc { name: name, f: f }))
     }
 
     /**
@@ -622,6 +783,39 @@ impl Command {
     }
 
     /**
+     * setEnvPrefix
+     * Sets the prefix the environment variables of this command and its descendants are named after, so --log-level reads PREFIX_LOG_LEVEL
+     * @param s {string} - the prefix without its trailing underscore, "" turning the naming off
+     * @return nothing
+     **/
+    func setEnvPrefix(s: string) -> void {
+        // Store the prefix
+        self.envPrefix = s
+    }
+
+    /**
+     * setConfigFile
+     * Sets the config file this command and its descendants read when no flag names one, a file that is not there being no error
+     * @param path {string} - the path, "" for no default file
+     * @return nothing
+     **/
+    func setConfigFile(path: string) -> void {
+        // Store the path
+        self.configFile = path
+    }
+
+    /**
+     * setConfigFlag
+     * Names the string flag whose value, once the line sets it, names the config file to read instead of the default one
+     * @param name {string} - the long name of the flag, "" for no such flag
+     * @return nothing
+     **/
+    func setConfigFlag(name: string) -> void {
+        // Store the flag name
+        self.configFlag = name
+    }
+
+    /**
      * setSilenceUsage
      * When true no "Run ... --help" hint follows an error
      * @param b {bool} - the setting
@@ -829,6 +1023,12 @@ impl Command {
         if self.findChild((*child).name) >= 0 {
             novaFault("command '", (*child).name, "' already added")
         }
+
+        // A child under two parents would be freed twice, so that is a fault too
+        if (*child).hasParent {
+            novaFault("command '", (*child).name, "' already has a parent")
+        }
+        (*child).hasParent = true
 
         // The child's alias vector
         aliases: *Vector<string> = (*child).aliases

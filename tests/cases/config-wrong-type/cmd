@@ -1,0 +1,1 @@
+config show --config examples/config/wrong-type.json

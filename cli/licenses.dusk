@@ -1,0 +1,350 @@
+/**
+ * cli/licenses.dusk
+ * The text of every license nova-cli init can write
+ *
+ * std only, no @import nova.*, so dusk check cli/licenses.dusk type-checks it on its own the
+ * way the other three generation files do. Each text is pushed one line at a time onto a
+ * builder rather than held as one long literal, so the year and the holder land on the
+ * copyright line and the rest reads in the source the way it reads in the file.
+ *
+ * The Apache text is the one from spdx wrapped at 78 columns, so it carries the wording of
+ * the license and not the indentation of the copy apache.org serves. The holder is whatever
+ * --author says, else the git config user.name of whoever is running init, else "the
+ * author", and the year is this year, so a generated LICENSE needs no editing before it is
+ * committed.
+ *
+ * Every export carries the lic prefix.
+ **/
+
+@paradigm procedural
+
+@import std.string
+
+/**
+ * licMit
+ * The MIT license text
+ * @param year {string} - the copyright year
+ * @param holder {string} - the copyright holder
+ * @return the complete file text as a fresh heap string
+ **/
+func licMit(year: string, holder: string) -> string {
+    // The builder every line is pushed onto
+    b: *StringBuilder = alloc(sb_new())
+
+    sb_push(b, "MIT License\n")
+    sb_push(b, "\n")
+    sb_push(b, "Copyright (c) " + year + " " + holder + "\n")
+    sb_push(b, "\n")
+    sb_push(b, "Permission is hereby granted, free of charge, to any person obtaining a copy\n")
+    sb_push(b, "of this software and associated documentation files (the \"Software\"), to deal\n")
+    sb_push(b, "in the Software without restriction, including without limitation the rights\n")
+    sb_push(b, "to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n")
+    sb_push(b, "copies of the Software, and to permit persons to whom the Software is\n")
+    sb_push(b, "furnished to do so, subject to the following conditions:\n")
+    sb_push(b, "\n")
+    sb_push(b, "The above copyright notice and this permission notice shall be included in all\n")
+    sb_push(b, "copies or substantial portions of the Software.\n")
+    sb_push(b, "\n")
+    sb_push(b, "THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n")
+    sb_push(b, "IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n")
+    sb_push(b, "FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n")
+    sb_push(b, "AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n")
+    sb_push(b, "LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n")
+    sb_push(b, "OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n")
+    sb_push(b, "SOFTWARE.\n")
+
+    // Copy the builder out before freeing it
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+
+    // The finished license
+    return out
+}
+
+/**
+ * licApache2
+ * The Apache License 2.0 text, with the year and the holder filled into its appendix
+ * @param year {string} - the copyright year
+ * @param holder {string} - the copyright holder
+ * @return the complete file text as a fresh heap string
+ **/
+func licApache2(year: string, holder: string) -> string {
+    // The builder every line is pushed onto
+    b: *StringBuilder = alloc(sb_new())
+
+    sb_push(b, "Apache License\n")
+    sb_push(b, "Version 2.0, January 2004\n")
+    sb_push(b, "http://www.apache.org/licenses/\n")
+    sb_push(b, "\n")
+    sb_push(b, "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION\n")
+    sb_push(b, "\n")
+    sb_push(b, "1. Definitions.\n")
+    sb_push(b, "\n")
+    sb_push(b, "\"License\" shall mean the terms and conditions for use, reproduction, and\n")
+    sb_push(b, "distribution as defined by Sections 1 through 9 of this document.\n")
+    sb_push(b, "\n")
+    sb_push(b, "\"Licensor\" shall mean the copyright owner or entity authorized by the\n")
+    sb_push(b, "copyright owner that is granting the License.\n")
+    sb_push(b, "\n")
+    sb_push(b, "\"Legal Entity\" shall mean the union of the acting entity and all other\n")
+    sb_push(b, "entities that control, are controlled by, or are under common control with\n")
+    sb_push(b, "that entity. For the purposes of this definition, \"control\" means (i) the\n")
+    sb_push(b, "power, direct or indirect, to cause the direction or management of such\n")
+    sb_push(b, "entity, whether by contract or otherwise, or (ii) ownership of fifty percent\n")
+    sb_push(b, "(50%) or more of the outstanding shares, or (iii) beneficial ownership of such\n")
+    sb_push(b, "entity.\n")
+    sb_push(b, "\n")
+    sb_push(b, "\"You\" (or \"Your\") shall mean an individual or Legal Entity exercising\n")
+    sb_push(b, "permissions granted by this License.\n")
+    sb_push(b, "\n")
+    sb_push(b, "\"Source\" form shall mean the preferred form for making modifications,\n")
+    sb_push(b, "including but not limited to software source code, documentation source, and\n")
+    sb_push(b, "configuration files.\n")
+    sb_push(b, "\n")
+    sb_push(b, "\"Object\" form shall mean any form resulting from mechanical transformation or\n")
+    sb_push(b, "translation of a Source form, including but not limited to compiled object\n")
+    sb_push(b, "code, generated documentation, and conversions to other media types.\n")
+    sb_push(b, "\n")
+    sb_push(b, "\"Work\" shall mean the work of authorship, whether in Source or Object form,\n")
+    sb_push(b, "made available under the License, as indicated by a copyright notice that is\n")
+    sb_push(b, "included in or attached to the work (an example is provided in the Appendix\n")
+    sb_push(b, "below).\n")
+    sb_push(b, "\n")
+    sb_push(b, "\"Derivative Works\" shall mean any work, whether in Source or Object form, that\n")
+    sb_push(b, "is based on (or derived from) the Work and for which the editorial revisions,\n")
+    sb_push(b, "annotations, elaborations, or other modifications represent, as a whole, an\n")
+    sb_push(b, "original work of authorship. For the purposes of this License, Derivative\n")
+    sb_push(b, "Works shall not include works that remain separable from, or merely link (or\n")
+    sb_push(b, "bind by name) to the interfaces of, the Work and Derivative Works thereof.\n")
+    sb_push(b, "\n")
+    sb_push(b, "\"Contribution\" shall mean any work of authorship, including the original\n")
+    sb_push(b, "version of the Work and any modifications or additions to that Work or\n")
+    sb_push(b, "Derivative Works thereof, that is intentionally submitted to Licensor for\n")
+    sb_push(b, "inclusion in the Work by the copyright owner or by an individual or Legal\n")
+    sb_push(b, "Entity authorized to submit on behalf of the copyright owner. For the purposes\n")
+    sb_push(b, "of this definition, \"submitted\" means any form of electronic, verbal, or\n")
+    sb_push(b, "written communication sent to the Licensor or its representatives, including\n")
+    sb_push(b, "but not limited to communication on electronic mailing lists, source code\n")
+    sb_push(b, "control systems, and issue tracking systems that are managed by, or on behalf\n")
+    sb_push(b, "of, the Licensor for the purpose of discussing and improving the Work, but\n")
+    sb_push(b, "excluding communication that is conspicuously marked or otherwise designated\n")
+    sb_push(b, "in writing by the copyright owner as \"Not a Contribution.\"\n")
+    sb_push(b, "\n")
+    sb_push(b, "\"Contributor\" shall mean Licensor and any individual or Legal Entity on behalf\n")
+    sb_push(b, "of whom a Contribution has been received by Licensor and subsequently\n")
+    sb_push(b, "incorporated within the Work.\n")
+    sb_push(b, "\n")
+    sb_push(b, "2. Grant of Copyright License. Subject to the terms and conditions of this\n")
+    sb_push(b, "License, each Contributor hereby grants to You a perpetual, worldwide,\n")
+    sb_push(b, "non-exclusive, no-charge, royalty-free, irrevocable copyright license to\n")
+    sb_push(b, "reproduce, prepare Derivative Works of, publicly display, publicly perform,\n")
+    sb_push(b, "sublicense, and distribute the Work and such Derivative Works in Source or\n")
+    sb_push(b, "Object form.\n")
+    sb_push(b, "\n")
+    sb_push(b, "3. Grant of Patent License. Subject to the terms and conditions of this\n")
+    sb_push(b, "License, each Contributor hereby grants to You a perpetual, worldwide,\n")
+    sb_push(b, "non-exclusive, no-charge, royalty-free, irrevocable (except as stated in this\n")
+    sb_push(b, "section) patent license to make, have made, use, offer to sell, sell, import,\n")
+    sb_push(b, "and otherwise transfer the Work, where such license applies only to those\n")
+    sb_push(b, "patent claims licensable by such Contributor that are necessarily infringed by\n")
+    sb_push(b, "their Contribution(s) alone or by combination of their Contribution(s) with\n")
+    sb_push(b, "the Work to which such Contribution(s) was submitted. If You institute patent\n")
+    sb_push(b, "litigation against any entity (including a cross-claim or counterclaim in a\n")
+    sb_push(b, "lawsuit) alleging that the Work or a Contribution incorporated within the Work\n")
+    sb_push(b, "constitutes direct or contributory patent infringement, then any patent\n")
+    sb_push(b, "licenses granted to You under this License for that Work shall terminate as of\n")
+    sb_push(b, "the date such litigation is filed.\n")
+    sb_push(b, "\n")
+    sb_push(b, "4. Redistribution. You may reproduce and distribute copies of the Work or\n")
+    sb_push(b, "Derivative Works thereof in any medium, with or without modifications, and in\n")
+    sb_push(b, "Source or Object form, provided that You meet the following conditions:\n")
+    sb_push(b, "\n")
+    sb_push(b, "     (a) You must give any other recipients of the Work or Derivative Works a\n")
+    sb_push(b, "copy of this License; and\n")
+    sb_push(b, "\n")
+    sb_push(b, "     (b) You must cause any modified files to carry prominent notices stating\n")
+    sb_push(b, "that You changed the files; and\n")
+    sb_push(b, "\n")
+    sb_push(b, "     (c) You must retain, in the Source form of any Derivative Works that You\n")
+    sb_push(b, "distribute, all copyright, patent, trademark, and attribution notices from the\n")
+    sb_push(b, "Source form of the Work, excluding those notices that do not pertain to any\n")
+    sb_push(b, "part of the Derivative Works; and\n")
+    sb_push(b, "\n")
+    sb_push(b, "     (d) If the Work includes a \"NOTICE\" text file as part of its\n")
+    sb_push(b, "distribution, then any Derivative Works that You distribute must include a\n")
+    sb_push(b, "readable copy of the attribution notices contained within such NOTICE file,\n")
+    sb_push(b, "excluding those notices that do not pertain to any part of the Derivative\n")
+    sb_push(b, "Works, in at least one of the following places: within a NOTICE text file\n")
+    sb_push(b, "distributed as part of the Derivative Works; within the Source form or\n")
+    sb_push(b, "documentation, if provided along with the Derivative Works; or, within a\n")
+    sb_push(b, "display generated by the Derivative Works, if and wherever such third-party\n")
+    sb_push(b, "notices normally appear. The contents of the NOTICE file are for informational\n")
+    sb_push(b, "purposes only and do not modify the License. You may add Your own attribution\n")
+    sb_push(b, "notices within Derivative Works that You distribute, alongside or as an\n")
+    sb_push(b, "addendum to the NOTICE text from the Work, provided that such additional\n")
+    sb_push(b, "attribution notices cannot be construed as modifying the License.\n")
+    sb_push(b, "\n")
+    sb_push(b, "     You may add Your own copyright statement to Your modifications and may\n")
+    sb_push(b, "provide additional or different license terms and conditions for use,\n")
+    sb_push(b, "reproduction, or distribution of Your modifications, or for any such\n")
+    sb_push(b, "Derivative Works as a whole, provided Your use, reproduction, and distribution\n")
+    sb_push(b, "of the Work otherwise complies with the conditions stated in this License.\n")
+    sb_push(b, "\n")
+    sb_push(b, "5. Submission of Contributions. Unless You explicitly state otherwise, any\n")
+    sb_push(b, "Contribution intentionally submitted for inclusion in the Work by You to the\n")
+    sb_push(b, "Licensor shall be under the terms and conditions of this License, without any\n")
+    sb_push(b, "additional terms or conditions. Notwithstanding the above, nothing herein\n")
+    sb_push(b, "shall supersede or modify the terms of any separate license agreement you may\n")
+    sb_push(b, "have executed with Licensor regarding such Contributions.\n")
+    sb_push(b, "\n")
+    sb_push(b, "6. Trademarks. This License does not grant permission to use the trade names,\n")
+    sb_push(b, "trademarks, service marks, or product names of the Licensor, except as\n")
+    sb_push(b, "required for reasonable and customary use in describing the origin of the Work\n")
+    sb_push(b, "and reproducing the content of the NOTICE file.\n")
+    sb_push(b, "\n")
+    sb_push(b, "7. Disclaimer of Warranty. Unless required by applicable law or agreed to in\n")
+    sb_push(b, "writing, Licensor provides the Work (and each Contributor provides its\n")
+    sb_push(b, "Contributions) on an \"AS IS\" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY\n")
+    sb_push(b, "KIND, either express or implied, including, without limitation, any warranties\n")
+    sb_push(b, "or conditions of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A\n")
+    sb_push(b, "PARTICULAR PURPOSE. You are solely responsible for determining the\n")
+    sb_push(b, "appropriateness of using or redistributing the Work and assume any risks\n")
+    sb_push(b, "associated with Your exercise of permissions under this License.\n")
+    sb_push(b, "\n")
+    sb_push(b, "8. Limitation of Liability. In no event and under no legal theory, whether in\n")
+    sb_push(b, "tort (including negligence), contract, or otherwise, unless required by\n")
+    sb_push(b, "applicable law (such as deliberate and grossly negligent acts) or agreed to in\n")
+    sb_push(b, "writing, shall any Contributor be liable to You for damages, including any\n")
+    sb_push(b, "direct, indirect, special, incidental, or consequential damages of any\n")
+    sb_push(b, "character arising as a result of this License or out of the use or inability\n")
+    sb_push(b, "to use the Work (including but not limited to damages for loss of goodwill,\n")
+    sb_push(b, "work stoppage, computer failure or malfunction, or any and all other\n")
+    sb_push(b, "commercial damages or losses), even if such Contributor has been advised of\n")
+    sb_push(b, "the possibility of such damages.\n")
+    sb_push(b, "\n")
+    sb_push(b, "9. Accepting Warranty or Additional Liability. While redistributing the Work\n")
+    sb_push(b, "or Derivative Works thereof, You may choose to offer, and charge a fee for,\n")
+    sb_push(b, "acceptance of support, warranty, indemnity, or other liability obligations\n")
+    sb_push(b, "and/or rights consistent with this License. However, in accepting such\n")
+    sb_push(b, "obligations, You may act only on Your own behalf and on Your sole\n")
+    sb_push(b, "responsibility, not on behalf of any other Contributor, and only if You agree\n")
+    sb_push(b, "to indemnify, defend, and hold each Contributor harmless for any liability\n")
+    sb_push(b, "incurred by, or claims asserted against, such Contributor by reason of your\n")
+    sb_push(b, "accepting any such warranty or additional liability.\n")
+    sb_push(b, "\n")
+    sb_push(b, "END OF TERMS AND CONDITIONS\n")
+    sb_push(b, "\n")
+    sb_push(b, "APPENDIX: How to apply the Apache License to your work.\n")
+    sb_push(b, "\n")
+    sb_push(b, "To apply the Apache License to your work, attach the following boilerplate\n")
+    sb_push(b, "notice, with the fields enclosed by brackets \"[]\" replaced with your own\n")
+    sb_push(b, "identifying information. (Don't include the brackets!)  The text should be\n")
+    sb_push(b, "enclosed in the appropriate comment syntax for the file format. We also\n")
+    sb_push(b, "recommend that a file or class name and description of purpose be included on\n")
+    sb_push(b, "the same \"printed page\" as the copyright notice for easier identification\n")
+    sb_push(b, "within third-party archives.\n")
+    sb_push(b, "\n")
+    sb_push(b, "Copyright " + year + " " + holder + "\n")
+    sb_push(b, "\n")
+    sb_push(b, "Licensed under the Apache License, Version 2.0 (the \"License\");\n")
+    sb_push(b, "you may not use this file except in compliance with the License.\n")
+    sb_push(b, "You may obtain a copy of the License at\n")
+    sb_push(b, "\n")
+    sb_push(b, "http://www.apache.org/licenses/LICENSE-2.0\n")
+    sb_push(b, "\n")
+    sb_push(b, "Unless required by applicable law or agreed to in writing, software\n")
+    sb_push(b, "distributed under the License is distributed on an \"AS IS\" BASIS,\n")
+    sb_push(b, "WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n")
+    sb_push(b, "See the License for the specific language governing permissions and\n")
+    sb_push(b, "limitations under the License.\n")
+
+    // Copy the builder out before freeing it
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+
+    // The finished license
+    return out
+}
+
+/**
+ * licBsd3
+ * The BSD 3-Clause license text
+ * @param year {string} - the copyright year
+ * @param holder {string} - the copyright holder
+ * @return the complete file text as a fresh heap string
+ **/
+func licBsd3(year: string, holder: string) -> string {
+    // The builder every line is pushed onto
+    b: *StringBuilder = alloc(sb_new())
+
+    sb_push(b, "BSD 3-Clause License\n")
+    sb_push(b, "\n")
+    sb_push(b, "Copyright (c) " + year + ", " + holder + "\n")
+    sb_push(b, "\n")
+    sb_push(b, "Redistribution and use in source and binary forms, with or without\n")
+    sb_push(b, "modification, are permitted provided that the following conditions are met:\n")
+    sb_push(b, "\n")
+    sb_push(b, "1. Redistributions of source code must retain the above copyright notice, this\n")
+    sb_push(b, "   list of conditions and the following disclaimer.\n")
+    sb_push(b, "\n")
+    sb_push(b, "2. Redistributions in binary form must reproduce the above copyright notice,\n")
+    sb_push(b, "   this list of conditions and the following disclaimer in the documentation\n")
+    sb_push(b, "   and/or other materials provided with the distribution.\n")
+    sb_push(b, "\n")
+    sb_push(b, "3. Neither the name of the copyright holder nor the names of its\n")
+    sb_push(b, "   contributors may be used to endorse or promote products derived from\n")
+    sb_push(b, "   this software without specific prior written permission.\n")
+    sb_push(b, "\n")
+    sb_push(b, "THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS \"AS IS\"\n")
+    sb_push(b, "AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE\n")
+    sb_push(b, "IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE\n")
+    sb_push(b, "DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE\n")
+    sb_push(b, "FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL\n")
+    sb_push(b, "DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR\n")
+    sb_push(b, "SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER\n")
+    sb_push(b, "CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,\n")
+    sb_push(b, "OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE\n")
+    sb_push(b, "OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.\n")
+
+    // Copy the builder out before freeing it
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+
+    // The finished license
+    return out
+}
+
+/**
+ * licKinds
+ * The values --license takes, in the order help lists them
+ * @return the comma separated list addChoice is declared with
+ **/
+export func licKinds() -> string {
+    // none is the default, which writes no LICENSE at all
+    return "mit,apache2,bsd3,none"
+}
+
+/**
+ * licText
+ * The license text one --license value names
+ * @param kind {string} - the --license value, already one of licKinds
+ * @param year {string} - the copyright year
+ * @param holder {string} - the copyright holder
+ * @return the file text as a fresh heap string, paired with whether there is a file to write
+ **/
+export func licText(kind: string, year: string, holder: string) -> (string, bool) {
+    // The three licenses, matched by the word --license took
+    if str_eq(kind, "mit") {
+        return (licMit(year, holder), true)
+    }
+    if str_eq(kind, "apache2") {
+        return (licApache2(year, holder), true)
+    }
+    if str_eq(kind, "bsd3") {
+        return (licBsd3(year, holder), true)
+    }
+
+    // none, and anything nova's choice flag would already have refused, the empty text still
+    // being a fresh heap string so every caller frees the same way
+    return (substring("", 0, 0), false)
+}

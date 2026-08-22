@@ -1,0 +1,346 @@
+// Unit test root for nova/doc.dusk. Run it with cd tests/unit && dusk run doc_test.dusk
+// 2>&1 | diff - doc_test.expected. The tree is built, handed to novaExecute once with a
+// harmless argv so execFixup has set every path and added the root's --version flag, and
+// only then rendered, since a page is named after the path fixup writes. The builtin help
+// and completion commands are switched off so the golden pins this file's own tree and
+// nothing the library adds around it.
+//
+// The last block reads the runtime's live block registry through cool_gen_registry_snapshot
+// around a render and around a whole write, the way free_test.dusk does, so each line is how
+// many blocks that one call left behind, and both of them are 0.
+@paradigm oop
+@paradigm procedural
+
+// Stdlib pieces the listing and the scratch directory lean on
+@import std.string
+@import std.vector
+@import std.fs
+
+// The library, doc.dusk plus everything building and running a tree touches
+@import nova.command
+@import nova.context
+@import nova.flagset
+@import nova.args
+@import nova.exec
+@import nova.doc
+
+// The runtime's live block registry, which dusk itself does not wrap
+foreign "C" {
+    func cool_gen_registry_snapshot(ptrs: *raw char, sizes: *raw char) -> int64
+}
+
+/**
+ * live
+ * Gives the number of blocks the runtime has handed out and not taken back, the two buffers the snapshot fills being freed again and discounted so the reading is of everything else
+ * @return the live block count
+ **/
+func live() -> int64 {
+    // The two out parameters cool_gen_registry_snapshot writes its arrays into
+    a: *raw char = alloc_bytes(8)
+    b: *raw char = alloc_bytes(8)
+
+    // The count, taken while the two buffers are themselves live
+    n: int64 = cool_gen_registry_snapshot(a, b)
+
+    // Free the buffers and take them back out of the count
+    free(a)
+    free(b)
+    return n - 2
+}
+
+/**
+ * docTestDir
+ * The scratch directory the written tree lands in, cleaned by tests/run.sh with the rest of target
+ * @return the directory path, relative to tests/unit
+ **/
+func docTestDir() -> string {
+    // Under target/, which the harness removes once the run is over
+    return "target/doc_test_out"
+}
+
+/**
+ * quietRun
+ * A handler that makes a command runnable without printing anything
+ * @param ctx {*Context} - the run context, unused here
+ * @return int32 - 0
+ **/
+func quietRun(ctx: *Context) -> int32 {
+    // Nothing to do, the run is only here so the tree has a use line
+    return int32(0)
+}
+
+/**
+ * buildTree
+ * Builds the small tree the pages are rendered from, a root with two children, a grandchild and a hidden command
+ * @return *Command - the root command
+ **/
+func buildTree() -> *Command {
+    // The root, which carries a version so fixup adds its --version flag
+    root: *Command = cmdNew("app [flags]", "A tiny application")
+    root.setLong("app is a tiny application whose only job is to be documented.")
+    root.setExample("  app serve --port 9090\n  app config set key value")
+    root.setVersion("1.2.3")
+    root.setRun(quietRun)
+
+    // The builtins are switched off so the golden holds this file's own commands alone
+    root.setDisableHelpCmd(true)
+    root.setDisableCompletionCmd(true)
+
+    // One flag every command in the tree inherits and one the root alone reads
+    root.persistentFlags().addStr("config", "c", "", "config file")
+    root.localFlags().addBool("quiet", "q", false, "print nothing")
+
+    // The first child, which declares one flag of every richer kind
+    serve: *Command = cmdNew("serve", "Serve traffic")
+    serve.setLong("serve listens on a port until it is stopped.")
+    serve.setExample("  app serve --port 9090 --tag a,b")
+    serve.setRun(quietRun)
+    serve.localFlags().addInt("port", "p", 8080, "port to listen on")
+    serve.localFlags().addFloat("rate", "", 2.5, "requests per second")
+    serve.localFlags().addStrs("tag", "t", "a,b", "tags to attach")
+    serve.localFlags().addCount("verbose", "v", "verbosity, repeat for more")
+    serve.localFlags().addChoice("emit", "e", "llvm", "llvm,obj", "what to emit")
+    serve.persistentFlags().addStr("host", "H", "localhost", "host to bind")
+
+    // A hidden flag and a deprecated one, neither of which any page shows
+    serve.localFlags().addBool("secret", "", false, "hidden flag")
+    serve.localFlags().markHidden("secret")
+    serve.localFlags().addBool("legacy", "", false, "deprecated flag")
+    serve.localFlags().markDeprecated("legacy", "use --emit instead")
+
+    // The second child, which has a child of its own
+    config: *Command = cmdNew("config", "Read and write configuration")
+    set: *Command = cmdNew("set <key> <value>", "Set one configuration key")
+    set.setRun(quietRun)
+    set.setArgs(argsExact(2))
+    set.localFlags().addBool("force", "f", false, "overwrite an existing key")
+    config.addCommand(set)
+
+    // A hidden command, which gets no page of its own and shows up in no link list
+    secret: *Command = cmdNew("secret", "Not for the manual")
+    secret.setRun(quietRun)
+    secret.setHidden(true)
+
+    // The docs command itself, hidden the same way, so it never documents itself
+    root.addCommand(serve)
+    root.addCommand(config)
+    root.addCommand(secret)
+    root.addCommand(docCommandNew())
+
+    // The finished tree
+    return root
+}
+
+/**
+ * showPage
+ * Prints one rendered page under a header, with a rule marking where it ends
+ * @param label {string} - the name the page is reported under
+ * @param subject {*Command} - the command the page describes
+ * @param chain {*Vector<*Command>} - the commands root..subject
+ * @return void
+ **/
+func showPage(label: string, subject: *Command, chain: *Vector<*Command>) -> void {
+    // The header naming the page, which is not part of the page itself
+    println("== page {} ==", label)
+
+    // The page itself, printed verbatim and freed
+    page: string = docMarkdown(subject, chain)
+    print(page)
+    free(page)
+
+    // The rule that closes it, so a trailing blank line is visible in the golden
+    println("--")
+}
+
+/**
+ * cleanDir
+ * Removes every file left in the scratch directory by an earlier run, so the listing is only this run's
+ * @param dir {string} - the directory to empty, which may not exist yet
+ * @return void
+ **/
+func cleanDir(dir: string) -> void {
+    // Open it, where a missing directory means there is nothing to clean
+    d, oe := dir_open(dir)
+    if oe.exists() {
+        oe.ignore()
+        return
+    }
+
+    // The names found, collected before anything is removed
+    names: *Vector<string> = alloc(vec_new())
+
+    // Whether there are more entries to read
+    mut going: bool = true
+
+    // Loop draining the directory
+    while going {
+        // The next entry name, paired with whether there was one
+        name, found := dir_next(d)
+        if !found {
+            going = false
+        } else if ends_with(name, ".md") {
+            vec_push(names, name)
+        }
+    }
+
+    // Close it before unlinking anything inside
+    ce := dir_close(d)
+    ce.ignore()
+
+    // Loop removing each page an earlier run left
+    mut i: int64 = 0
+    while i < vec_len(names) {
+        path: string = path_join(dir, vec_get(names, i))
+        re := remove_file(path)
+        re.ignore()
+        free(path)
+        i = i + 1
+    }
+
+    // Free the names and their vector
+    vec_free(names)
+    free(names)
+}
+
+/**
+ * listDir
+ * Prints the names of the pages in a directory in name order, which is what docWriteTree wrote
+ * @param dir {string} - the directory to list
+ * @return void
+ **/
+func listDir(dir: string) -> void {
+    // Open it, where a missing directory is a failure worth printing
+    d, oe := dir_open(dir)
+    if oe.exists() {
+        println("cannot list {}: {}", dir, oe.message)
+        return
+    }
+
+    // The names found
+    names: *Vector<string> = alloc(vec_new())
+
+    // Whether there are more entries to read
+    mut going: bool = true
+
+    // Loop collecting every page
+    while going {
+        // The next entry name, paired with whether there was one
+        name, found := dir_next(d)
+        if !found {
+            going = false
+        } else if ends_with(name, ".md") {
+            vec_push(names, name)
+        }
+    }
+
+    // Close the directory, the close failure tells the test nothing useful
+    ce := dir_close(d)
+    ce.ignore()
+
+    // The reading order is the filesystem's, so sort it into one the golden can pin
+    vec_sort(names, str_cmp)
+
+    // One line per page
+    mut i: int64 = 0
+    while i < vec_len(names) {
+        println("wrote {}", vec_get(names, i))
+        i = i + 1
+    }
+
+    // Free the names and their vector
+    vec_free(names)
+    free(names)
+}
+
+/**
+ * main
+ * Renders two pages of a small tree and writes the whole tree out, printing everything the golden pins
+ * @param argc {int32} - the argument count, unused here
+ * @param argv {string[]} - the raw command line, unused here since the run mints its own
+ * @return int32 - 0, the diff against the expected file is what decides the result
+ **/
+func main(argc: int32, argv: string[]) -> int32 {
+    // The tree under test
+    root: *Command = buildTree()
+
+    // One harmless run, whose only purpose is the fixup that sets the paths and adds --version
+    a1: string[1] = ["app"]
+    code: int32 = novaExecute(root, collector<string[]>(a1[0..a1.len]))
+    println("fixup run exit {}", code)
+    println("")
+
+    // The chain the root is rendered against, which is the root alone
+    rootChain: *Vector<*Command> = alloc(vec_new())
+    vec_push(rootChain, root)
+
+    // The root's own page
+    showPage("app", root, rootChain)
+
+    // The chain of the first child
+    serve: *Command = root.child(root.findChild("serve"))
+    serveChain: *Vector<*Command> = alloc(vec_new())
+    vec_push(serveChain, root)
+    vec_push(serveChain, serve)
+
+    // The child's page, whose inherited block is the root's persistent flag
+    showPage("app serve", serve, serveChain)
+
+    // The name each page is written under
+    fname: string = docFileName("app config set")
+    println("docFileName app config set -> {}", fname)
+    free(fname)
+    println("")
+
+    // The whole tree written to disk, after clearing whatever an earlier run left
+    dir: string = docTestDir()
+    cleanDir(dir)
+    e := docWriteTree(root, dir)
+    if e.exists() {
+        println("docWriteTree: {}", e.message)
+    } else {
+        println("docWriteTree ok")
+    }
+
+    // What it wrote, which holds no page for the hidden commands
+    listDir(dir)
+
+    // The blocks one render and one whole write leave behind, each read twice since the
+    // second reading is the one nothing one-time is mixed into
+    println("")
+    println("## per call leak")
+
+    // One page rendered and freed
+    mut md: int64 = 0
+    mut i: int64 = 0
+    while i < 2 {
+        b0: int64 = live()
+        page: string = docMarkdown(serve, serveChain)
+        free(page)
+        md = live() - b0
+        i = i + 1
+    }
+    println("docMarkdown render and free: {}", md)
+
+    // The whole tree written out again, over the pages the write above left
+    mut wt: int64 = 0
+    mut j: int64 = 0
+    while j < 2 {
+        w0: int64 = live()
+        we := docWriteTree(root, dir)
+        if we.exists() {
+            println("docWriteTree: {}", we.message)
+        }
+        wt = live() - w0
+        j = j + 1
+    }
+    println("docWriteTree: {}", wt)
+
+    // Free the two chains, the commands inside belong to the tree
+    vec_free(rootChain)
+    free(rootChain)
+    vec_free(serveChain)
+    free(serveChain)
+
+    // The diff decides the result
+    return int32(0)
+}

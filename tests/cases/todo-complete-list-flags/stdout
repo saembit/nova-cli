@@ -1,0 +1,7 @@
+--all	include completed items
+-a	include completed items
+--help	help for list
+-h	help for list
+--verbose	verbose output
+-v	verbose output
+:4

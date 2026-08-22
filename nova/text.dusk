@@ -91,14 +91,77 @@ export func textBool(b: bool) -> string {
 }
 
 /**
+ * textCat3
+ * Joins three pieces into one string without leaving the halfway result behind, which a plain a + b + c would since every concatenation mints a string of its own
+ * @param a {string} - the first piece, borrowed
+ * @param b {string} - the second piece, borrowed
+ * @param c {string} - the third piece, borrowed
+ * @return a fresh heap string
+ **/
+export func textCat3(a: string, b: string, c: string) -> string {
+    // The first two pieces
+    ab: string = a + b
+
+    // The third one after them
+    out: string = ab + c
+
+    // Free the halfway result
+    free(ab)
+    return out
+}
+
+/**
+ * textCat4
+ * Joins four pieces into one string without leaving the halfway results behind
+ * @param a {string} - the first piece, borrowed
+ * @param b {string} - the second piece, borrowed
+ * @param c {string} - the third piece, borrowed
+ * @param d {string} - the fourth piece, borrowed
+ * @return a fresh heap string
+ **/
+export func textCat4(a: string, b: string, c: string, d: string) -> string {
+    // The first three pieces
+    abc: string = textCat3(a, b, c)
+
+    // The fourth one after them
+    out: string = abc + d
+
+    // Free the halfway result
+    free(abc)
+    return out
+}
+
+/**
+ * textCat5
+ * Joins five pieces into one string without leaving the halfway results behind
+ * @param a {string} - the first piece, borrowed
+ * @param b {string} - the second piece, borrowed
+ * @param c {string} - the third piece, borrowed
+ * @param d {string} - the fourth piece, borrowed
+ * @param e {string} - the fifth piece, borrowed
+ * @return a fresh heap string
+ **/
+export func textCat5(a: string, b: string, c: string, d: string, e: string) -> string {
+    // The first four pieces
+    abcd: string = textCat4(a, b, c, d)
+
+    // The fifth one after them
+    out: string = abcd + e
+
+    // Free the halfway result
+    free(abcd)
+    return out
+}
+
+/**
  * textQuote
  * Wraps s in double quotes with no escaping
  * @param s {string} - the text to quote
  * @return a fresh heap string
  **/
 export func textQuote(s: string) -> string {
-    // Return the quoted text
-    return "\"" + s + "\""
+    // Return the quoted text, joined in one step so no halfway string is left behind
+    return textCat3("\"", s, "\"")
 }
 
 /**

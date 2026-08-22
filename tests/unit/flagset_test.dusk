@@ -394,6 +394,117 @@ func testText() -> void {
 
     // The shorthand length check, which only a single character passes
     println("is_one_char a {} ab {} empty {}", textBool(textIsOneChar("a")), textBool(textIsOneChar("ab")), textBool(textIsOneChar("")))
+
+    // The joins that keep no halfway result, three, four and five pieces at a time
+    c3: string = textCat3("a", "-", "b")
+    c4: string = textCat4("a", "-", "b", "!")
+    c5: string = textCat5("a", "-", "b", "-", "c")
+    println("cat [{}] [{}] [{}]", c3, c4, c5)
+    free(c3)
+    free(c4)
+    free(c5)
+}
+
+/**
+ * showSource
+ * Prints where the value of one flag came from together with the value itself
+ * @param label {string} - the name the flag is reported under
+ * @param fs {*FlagSet} - the set holding it
+ * @param name {string} - the long name
+ * @return void
+ **/
+func showSource(label: string, fs: *FlagSet, name: string) -> void {
+    // The flag itself, for the set test the required check runs
+    f: *Flag = fs.require(name)
+
+    // The source word, the changed bit and whether anything at all set it
+    println("{}: source={} changed={} set={}", label, flagSourceWord(fs.source(name)), textBool(fs.changed(name)), textBool(flagIsSet(f)))
+}
+
+/**
+ * testSources
+ * Exercises the env and config bindings, the four sources and what each of them does to changed
+ * @return void
+ **/
+func testSources() -> void {
+    // The four words, in rising precedence
+    println("words {} {} {} {}", flagSourceWord(FlagSource.SDefault), flagSourceWord(FlagSource.SConfig), flagSourceWord(FlagSource.SEnv), flagSourceWord(FlagSource.SLine))
+
+    // The variant test, since enums do not compare with ==
+    println("eq same {} eq other {}", textBool(flagSourceEq(FlagSource.SEnv, FlagSource.SEnv)), textBool(flagSourceEq(FlagSource.SEnv, FlagSource.SLine)))
+
+    // The variable a prefix and a long name name together, dashes turning into underscores
+    v1: string = flagEnvVarName("APP", "port")
+    v2: string = flagEnvVarName("MY_APP", "log-level")
+    println("env var {} {}", v1, v2)
+    free(v1)
+    free(v2)
+
+    // A set of one flag per kind the bindings touch
+    fs: *FlagSet = flagsetNew()
+    fs.addStr("host", "h", "localhost", "host to bind")
+    fs.addInt("port", "p", 8080, "port to listen on")
+    fs.addStrs("tags", "", "", "tags to attach")
+    fs.addChoice("emit", "e", "llvm", "llvm,obj", "what to emit")
+
+    // Every flag starts out holding its declaration
+    showSource("fresh host", fs, "host")
+
+    // An explicit binding, which the set remembers by name
+    fs.bindEnv("host", "APP_HOSTNAME")
+    hostf: *Flag = fs.require("host")
+    println("bound {}", (*hostf).env)
+
+    // A value from the environment, which sets no changed bit
+    e1: error = flagApplyValue(hostf, "example.org", FlagSource.SEnv)
+    showErr("apply host", e1)
+    showSource("env host", fs, "host")
+    println("host {}", fs.getStr("host"))
+
+    // A value from a config file, likewise
+    portf: *Flag = fs.require("port")
+    e2: error = flagApplyValue(portf, "9000", FlagSource.SConfig)
+    showErr("apply port", e2)
+    showSource("config port", fs, "port")
+    println("port {}", fs.getInt("port"))
+
+    // A value the kind refuses, which leaves the flag alone
+    e3: error = flagApplyValue(portf, "abc", FlagSource.SConfig)
+    showErr("apply port abc", e3)
+    println("port {}", fs.getInt("port"))
+
+    // A choice is validated wherever the value came from
+    emitf: *Flag = fs.require("emit")
+    e4: error = flagApplyValue(emitf, "wasm", FlagSource.SConfig)
+    showErr("apply emit wasm", e4)
+    e5: error = flagApplyValue(emitf, "obj", FlagSource.SConfig)
+    showErr("apply emit obj", e5)
+    println("emit {}", fs.getStr("emit"))
+
+    // A list from a config file replaces the default rather than adding to it
+    items: *Vector<string> = alloc(vec_new())
+    vec_push(items, "a")
+    vec_push(items, "b c")
+    flagApplyStrs(fs.require("tags"), items, FlagSource.SConfig)
+    vec_free(items)
+    free(items)
+    println("tags {} {}", str_join(fs.getStrs("tags"), "|"), flagSourceWord(fs.source("tags")))
+
+    // The command line wins over both and is the only source that sets changed
+    e6: error = fs.setValue(fs.find("host"), "typed.example")
+    showErr("set host", e6)
+    showSource("line host", fs, "host")
+    println("host {}", fs.getStr("host"))
+
+    // A reset puts every flag back to its declaration and forgets where the value came from
+    fs.reset()
+    showSource("reset host", fs, "host")
+    showSource("reset port", fs, "port")
+    println("host {} port {} emit {} tags {}", fs.getStr("host"), fs.getInt("port"), fs.getStr("emit"), str_join(fs.getStrs("tags"), "|"))
+
+    // Free the set and the set struct
+    fs.freeAll()
+    free(fs)
 }
 
 /**
@@ -423,6 +534,10 @@ func main(argc: int32, argv: string[]) -> int32 {
     // The text helpers
     println("== text ==")
     testText()
+
+    // The env and config sources
+    println("== sources ==")
+    testSources()
 
     // The marker the expected file ends on
     println("done")

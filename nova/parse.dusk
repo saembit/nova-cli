@@ -21,20 +21,17 @@ export struct ParseState {
     chain: *Vector<*Command>,
     pos: *Vector<string>,
     argv: string[],
+    words: *Vector<string>,
+    useWords: bool,
     toks: *Vector<string>,
     i: int64,
     helpRequested: bool,
     stopFlags: bool,
+    skipHidden: bool,
 }
 
-/**
- * parseStateNew
- * Builds a fresh scanner with the root as the only chain entry
- * @param rootc {*Command} - the root command
- * @param argv {string[]} - the raw argv, argv[0] is the program name
- * @return the new state on the heap
- **/
-export func parseStateNew(rootc: *Command, argv: string[]) -> *ParseState {
+// Builds a scanner over either an argv or a word vector, the shared body of the two constructors
+func parseStateMake(rootc: *Command, argv: string[], words: *Vector<string>, useWords: bool) -> *ParseState {
     // The chain of commands matched so far, starting at the root
     chain: *Vector<*Command> = alloc(vec_new())
     vec_push(chain, rootc)
@@ -45,14 +42,67 @@ export func parseStateNew(rootc: *Command, argv: string[]) -> *ParseState {
 
     // Return the state on the heap
     return alloc(ParseState {
-        chain: chain, pos: pos, argv: argv, toks: toks, i: 0,
-        helpRequested: false, stopFlags: false,
+        chain: chain, pos: pos, argv: argv, words: words, useWords: useWords,
+        toks: toks, i: 0,
+        helpRequested: false, stopFlags: false, skipHidden: false,
     })
 }
 
 /**
+ * parseStateNew
+ * Builds a fresh scanner with the root as the only chain entry
+ * @param rootc {*Command} - the root command
+ * @param argv {string[]} - the raw argv, argv[0] is the program name
+ * @return the new state on the heap
+ **/
+export func parseStateNew(rootc: *Command, argv: string[]) -> *ParseState {
+    // The empty word vector the argv form never reads
+    words: *Vector<string> = alloc(vec_new())
+
+    // Return a state that walks argv
+    return parseStateMake(rootc, argv, words, false)
+}
+
+/**
+ * parseStateNewFromVector
+ * Builds a fresh scanner over a vector of words rather than an argv, which is what the completion handler has to work with
+ * @param rootc {*Command} - the root command
+ * @param argv {string[]} - the raw argv, kept only so a Context built from this state carries it, never scanned
+ * @param words {*Vector<string>} - the words after the program name, the state takes the vector over and parseStateFree frees it while the strings inside stay borrowed
+ * @return the new state on the heap
+ **/
+export func parseStateNewFromVector(rootc: *Command, argv: string[], words: *Vector<string>) -> *ParseState {
+    // Return a state that walks the words
+    return parseStateMake(rootc, argv, words, true)
+}
+
+// The number of words after the program name, from the argv or from the word vector
+func parseWordCount(st: *ParseState) -> int64 {
+    // The word vector form counts every word in it
+    if (*st).useWords {
+        return vec_len((*st).words)
+    }
+
+    // The argv form counts everything after the program name
+    argv: string[] = (*st).argv
+    return argv.len - 1
+}
+
+// The word at index i counting from the first one after the program name
+func parseWordAt(st: *ParseState, i: int64) -> string {
+    // The word vector form reads it straight out
+    if (*st).useWords {
+        return vec_get((*st).words, i)
+    }
+
+    // The argv form skips the program name
+    argv: string[] = (*st).argv
+    return argv[i + 1]
+}
+
+/**
  * parseStateFree
- * Frees the chain, pos and toks vectors of a scanner, the commands and strings inside them are borrowed and stay, the state struct itself is left for its owner to free, nothing handed out from the state may be used after this returns
+ * Frees the chain, pos, toks and words vectors of a scanner, the commands and strings inside them are borrowed and stay, the state struct itself is left for its owner to free, nothing handed out from the state may be used after this returns
  * @param st {*ParseState} - the scanner whose vectors to free
  * @return nothing
  **/
@@ -68,6 +118,10 @@ export func parseStateFree(st: *ParseState) -> void {
     // Free the token vector
     vec_free((*st).toks)
     free((*st).toks)
+
+    // Free the word vector, empty on the argv form and owned by the state on the other one
+    vec_free((*st).words)
+    free((*st).words)
 }
 
 /**
@@ -105,8 +159,16 @@ func parseFindLongTakesValue(chain: *Vector<*Command>, tok: string) -> bool {
 
     // An unknown flag takes a value unless it is help
     if !found {
-        return name != "help"
+        // Whether the token was the undeclared help flag
+        isHelp: bool = name == "help"
+
+        // Free the name and answer
+        free(name)
+        return !isHelp
     }
+
+    // The name is done with
+    free(name)
 
     // The flag the name resolved to
     f: *Flag = fset.get(idx)
@@ -136,8 +198,16 @@ func parseFindShortTakesValue(chain: *Vector<*Command>, tok: string) -> bool {
 
     // An unknown shorthand takes a value unless it is h
     if !found {
-        return ch != "h"
+        // Whether the token was the undeclared help shorthand
+        isHelp: bool = ch == "h"
+
+        // Free the letter and answer
+        free(ch)
+        return !isHelp
     }
+
+    // The letter is done with
+    free(ch)
 
     // The flag the shorthand resolved to
     f: *Flag = fset.get(idx)
@@ -153,19 +223,19 @@ func parseFindShortTakesValue(chain: *Vector<*Command>, tok: string) -> bool {
  * @return ...
  **/
 export func parseFind(st: *ParseState) -> void {
-    // The argv, chain and token list in the state
-    argv: string[] = (*st).argv
+    // The chain, the token list and how many words there are to walk
     chain: *Vector<*Command> = (*st).chain
     toks: *Vector<string> = (*st).toks
+    n: int64 = parseWordCount(st)
 
     // Whether we are still matching command words
     mut descending: bool = true
 
-    // Loop over the tokens after the program name
-    mut i: int64 = 1
-    while i < argv.len {
+    // Loop over the words after the program name
+    mut i: int64 = 0
+    while i < n {
         // The current token
-        tok: string = argv[i]
+        tok: string = parseWordAt(st, i)
         i = i + 1
 
         // Once descending stops every token is kept for pass 2
@@ -187,8 +257,8 @@ export func parseFind(st: *ParseState) -> void {
         // A long flag is kept, along with its value token when it takes one
         if textIsLongFlag(tok) {
             vec_push(toks, tok)
-            if parseFindLongTakesValue(chain, tok) && i < argv.len {
-                vec_push(toks, argv[i])
+            if parseFindLongTakesValue(chain, tok) && i < n {
+                vec_push(toks, parseWordAt(st, i))
                 i = i + 1
             }
             continue
@@ -197,18 +267,21 @@ export func parseFind(st: *ParseState) -> void {
         // A short flag is kept, along with its value token when it takes one
         if textIsShortFlag(tok) {
             vec_push(toks, tok)
-            if parseFindShortTakesValue(chain, tok) && i < argv.len {
-                vec_push(toks, argv[i])
+            if parseFindShortTakesValue(chain, tok) && i < n {
+                vec_push(toks, parseWordAt(st, i))
                 i = i + 1
             }
             continue
         }
 
-        // Descend into the child the word names
+        // Descend into the child the word names, unless it is a hidden builtin a completion run must not walk into
         j: int64 = curc.findChild(tok)
         if j >= 0 {
-            vec_push(chain, curc.child(j))
-            continue
+            k: *Command = curc.child(j)
+            if !((*st).skipHidden && (*k).hidden && (*k).isBuiltin) {
+                vec_push(chain, k)
+                continue
+            }
         }
 
         // The first word naming no child stops the walk
@@ -225,7 +298,7 @@ func parseWarnDeprecated(st: *ParseState, f: *Flag) -> void {
     }
 
     // The warning line and the sink the run writes it to
-    line: string = "Flag --" + (*f).name + " has been deprecated, " + (*f).deprecated + "\n"
+    line: string = textCat5("Flag --", (*f).name, " has been deprecated, ", (*f).deprecated, "\n")
     chain: *Vector<*Command> = (*st).chain
 
     // Write the warning and free the line
@@ -267,8 +340,13 @@ func parseHelpFlag(st: *ParseState, val: string, hadEq: bool) -> error {
     // Parse the value as a bool
     b, e := flagParseBool(val)
     if e.exists() {
+        // The quoted value and the message built around it
         q: string = textQuote(val)
-        return error { message: "invalid argument " + q + " for \"--help\" flag: expected a boolean" }
+        msg: string = textCat3("invalid argument ", q, " for \"--help\" flag: expected a boolean")
+
+        // Free the quoted copy
+        free(q)
+        return error { message: msg }
     }
 
     // Record the parsed value
@@ -293,6 +371,18 @@ export func parseLongFlag(st: *ParseState, tok: string) -> error {
     body: string = substring(tok, 2, str_len(tok))
     name, val, hadEq := textSplitEq(body)
 
+    // Consume the flag the name resolves to
+    e: error = parseLongNamed(st, name, val, hadEq)
+
+    // Free the three pieces the split minted, a flag that took a value kept a copy of its own
+    free(val)
+    free(name)
+    free(body)
+    return e
+}
+
+// Consumes one long flag once its token is split into a name, the value after the "=" and whether there was one at all
+func parseLongNamed(st: *ParseState, name: string, val: string, hadEq: bool) -> error {
     // Look the name up on the chain
     chain: *Vector<*Command> = (*st).chain
     fset, idx, found := ctxLookupChain(chain, name)
@@ -381,11 +471,20 @@ export func parseShortCluster(st: *ParseState, tok: string) -> error {
         // An unknown shorthand is the help request or an error
         if !found {
             if ch == "h" {
+                free(ch)
                 (*st).helpRequested = true
                 k = k + 1
                 continue
             }
-            return error { message: "unknown shorthand flag: '" + ch + "' in -" + substring(tok, k, n) }
+
+            // The rest of the cluster the message points at
+            rest: string = substring(tok, k, n)
+            msg: string = textCat4("unknown shorthand flag: '", ch, "' in -", rest)
+
+            // Free the two pieces the message copied
+            free(rest)
+            free(ch)
+            return error { message: msg }
         }
 
         // The flag the shorthand resolved to
@@ -393,6 +492,7 @@ export func parseShortCluster(st: *ParseState, tok: string) -> error {
 
         // A bool flag is set on and the cluster goes on
         if flagKindEq((*f).kind, FlagKind.KBool) {
+            free(ch)
             fset.setBoolOn(idx)
             parseWarnDeprecated(st, f)
             k = k + 1
@@ -401,8 +501,14 @@ export func parseShortCluster(st: *ParseState, tok: string) -> error {
 
         // A count flag counts one more per letter, and an "=value" sets it outright and ends the cluster
         if flagKindEq((*f).kind, FlagKind.KCount) {
+            free(ch)
             if k + 1 < n && tok[k + 1] == 61 {
-                e3: error = fset.setValue(idx, substring(tok, k + 2, n))
+                // The digits after the "="
+                digits: string = substring(tok, k + 2, n)
+                e3: error = fset.setValue(idx, digits)
+
+                // Free the copy the flag no longer needs
+                free(digits)
                 if e3.exists() {
                     return e3
                 }
@@ -416,26 +522,46 @@ export func parseShortCluster(st: *ParseState, tok: string) -> error {
             continue
         }
 
-        // The raw value, the rest of the cluster or the next token
-        mut raw: string = ""
+        // The value is the rest of the cluster when there is one, after an optional "="
         if k + 1 < n {
-            if tok[k + 1] == 61 {
-                raw = substring(tok, k + 2, n)
-            } else {
-                raw = substring(tok, k + 1, n)
+            // Where the value starts, past the "=" when the cluster carries one
+            cut: int64 = if tok[k + 1] == 61 { k + 2 } else { k + 1 }
+
+            // The rest of the cluster as the value
+            raw: string = substring(tok, cut, n)
+            e: error = fset.setValue(idx, raw)
+
+            // Free the copy the flag no longer needs
+            free(raw)
+            free(ch)
+            if e.exists() {
+                return e
             }
-        } else {
-            nxt, ok := parseTakeNext(st)
-            if !ok {
-                return error { message: "flag needs an argument: '" + ch + "' in -" + substring(tok, k, n) }
-            }
-            raw = nxt
+
+            // Warn when the flag is deprecated and end the cluster
+            parseWarnDeprecated(st, f)
+            k = n
+            continue
+        }
+
+        // Otherwise the next token carries it
+        nxt, ok := parseTakeNext(st)
+        if !ok {
+            // The rest of the cluster the message points at
+            rest2: string = substring(tok, k, n)
+            msg2: string = textCat4("flag needs an argument: '", ch, "' in -", rest2)
+
+            // Free the two pieces the message copied
+            free(rest2)
+            free(ch)
+            return error { message: msg2 }
         }
 
         // Set the value on the flag
-        e: error = fset.setValue(idx, raw)
-        if e.exists() {
-            return e
+        e2: error = fset.setValue(idx, nxt)
+        free(ch)
+        if e2.exists() {
+            return e2
         }
 
         // Warn when the flag is deprecated and end the cluster

@@ -1,0 +1,714 @@
+/**
+ * nova/doc.dusk
+ * Markdown documentation for a command tree, one page per command in the shape Cobra's doc.GenMarkdown writes, plus the hidden docs command an application hangs off its root to write the whole tree out
+ * The flag blocks are the help output of the same command with the "Flags:" and "Global Flags:" headers swapped for markdown ones, so a page and a --help never disagree, and the pages only appear once novaExecute has fixed the tree up, since a command path is what names its file
+ **/
+@paradigm oop
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.fs
+@import flagset
+@import args
+@import text
+@import command
+@import context
+@import help
+
+// The gap between the flag column and its description, the same three spaces help leaves
+func docFlagGap() -> int64 {
+    return 3
+}
+
+// The POSIX mode bits that hold the file type, S_IFMT
+func docTypeMask() -> int64 {
+    return 61440
+}
+
+// The POSIX file type value that marks a directory, S_IFDIR
+func docDirBit() -> int64 {
+    return 16384
+}
+
+// Orders two flags by long name for vec_sort, the order help prints them in
+func docFlagCmp(a: *Flag, b: *Flag) -> int32 {
+    return str_cmp((*a).name, (*b).name)
+}
+
+// Pushes every visible flag of fset onto out, skipping any name already in taken
+func docCollectVisible(out: *Vector<*Flag>, taken: *Vector<string>, fset: *FlagSet) -> void {
+    // Loop over the flags in the set
+    mut i: int64 = 0
+    while i < fset.len() {
+        // Claim the name then keep the flag when it is visible
+        f: *Flag = fset.get(i)
+        if !vec_contains(taken, (*f).name) {
+            vec_push(taken, (*f).name)
+            if !(*f).hidden && (*f).deprecated == "" {
+                vec_push(out, f)
+            }
+        }
+        i = i + 1
+    }
+}
+
+// The left cell of a flag line, "  -s, --name type" or "      --name type"
+func docFlagCell(f: *Flag) -> string {
+    // A builder for the cell
+    sb: *StringBuilder = alloc(sb_new())
+    sb_push(sb, "  ")
+
+    // The shorthand or its padding
+    if (*f).short != "" {
+        sb_push(sb, "-")
+        sb_push(sb, (*f).short)
+        sb_push(sb, ", ")
+    } else {
+        sb_push(sb, "    ")
+    }
+
+    // The long name
+    sb_push(sb, "--")
+    sb_push(sb, (*f).name)
+
+    // The type word when the kind has one, the alternatives themselves for a choice
+    word: string = flagTypeWord(f)
+    if word != "" {
+        sb_push(sb, " ")
+        sb_push(sb, word)
+    }
+    free(word)
+
+    // Copy the text out and free the builder
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return out
+}
+
+// The " (default ...)" suffix of a flag line as a fresh heap string, empty when the default is zero
+func docFlagDefault(f: *Flag) -> string {
+    // Pick the suffix by kind, every one of them joined in one step so no halfway string is left behind
+    match (*f).kind {
+        KBool => return substring("", 0, 0),
+        KStr => {
+            if (*f).defS == "" {
+                return substring("", 0, 0)
+            }
+            return textCat3(" (default \"", (*f).defS, "\")")
+        },
+        KInt => {
+            if (*f).defI == 0 {
+                return substring("", 0, 0)
+            }
+
+            // The number as text, which the join borrows and this frees
+            n: string = int_to_string((*f).defI)
+            out: string = textCat3(" (default ", n, ")")
+            free(n)
+            return out
+        },
+        KFloat => {
+            // The float default, rendered the way dusk itself prints one
+            x: float64 = (*f).defF
+            if x == 0.0 {
+                return substring("", 0, 0)
+            }
+
+            // The number as text, which the join borrows and this frees
+            fx: string = f"{x}"
+            out: string = textCat3(" (default ", fx, ")")
+            free(fx)
+            return out
+        },
+        KStrs => {
+            // The default items, printed in the pflag shape with no spaces
+            dv: *Vector<string> = (*f).defV
+            if vec_len(dv) == 0 {
+                return substring("", 0, 0)
+            }
+            joined: string = str_join(dv, ",")
+            out: string = textCat3(" (default [", joined, "])")
+            free(joined)
+            return out
+        },
+        KCount => return substring("", 0, 0),
+        KChoice => {
+            if (*f).defS == "" {
+                return substring("", 0, 0)
+            }
+            return textCat3(" (default \"", (*f).defS, "\")")
+        },
+    }
+    return substring("", 0, 0)
+}
+
+// Appends one aligned line per flag in flags, which is already sorted, wrapping the descriptions when wrap is set
+func docPushFlagLines(sb: *StringBuilder, flags: *Vector<*Flag>, wrap: int64) -> void {
+    // The left cells and the widest one
+    cells: *Vector<string> = alloc(vec_new())
+    mut width: int64 = 0
+    mut i: int64 = 0
+    while i < vec_len(flags) {
+        cell: string = docFlagCell(vec_get(flags, i))
+        n: int64 = str_len(cell)
+        if n > width {
+            width = n
+        }
+        vec_push(cells, cell)
+        i = i + 1
+    }
+
+    // The column every description starts at, and a wrapped one continues at
+    col: int64 = width + docFlagGap()
+
+    // One padded line per flag
+    mut j: int64 = 0
+    while j < vec_len(flags) {
+        f: *Flag = vec_get(flags, j)
+        padded: string = textPadRight(vec_get(cells, j), col)
+        suffix: string = docFlagDefault(f)
+        sb_push(sb, padded)
+
+        // The description and its default suffix, wrapped at the column when one is set
+        if wrap > 0 {
+            text: string = (*f).help + suffix
+            textWrapInto(sb, text, wrap, col)
+            free(text)
+        } else {
+            sb_push(sb, (*f).help)
+            sb_push(sb, suffix)
+        }
+        sb_push(sb, "\n")
+        free(padded)
+        free(suffix)
+        j = j + 1
+    }
+
+    // Free the cells and their vector
+    textFreeStrings(cells)
+    vec_free(cells)
+    free(cells)
+}
+
+// The path of the command's parent on the chain, "" for the root
+func docParentPath(chain: *Vector<*Command>) -> string {
+    // The root has no parent
+    n: int64 = vec_len(chain)
+    if n < 2 {
+        return ""
+    }
+
+    // The entry before the last
+    p: *Command = vec_get(chain, n - 2)
+    return (*p).path
+}
+
+// The use line, parent path plus use plus " [flags]" unless the use already says so
+func docUseLine(subject: *Command, chain: *Vector<*Command>) -> string {
+    // The parent path and a builder
+    parent: string = docParentPath(chain)
+    sb: *StringBuilder = alloc(sb_new())
+
+    // Push the parent path when there is one
+    if parent != "" {
+        sb_push(sb, parent)
+        sb_push(sb, " ")
+    }
+
+    // Push the use and the [flags] marker
+    sb_push(sb, (*subject).use)
+    if !str_contains((*subject).use, "[flags]") {
+        sb_push(sb, " [flags]")
+    }
+
+    // Copy the text out and free the builder
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return out
+}
+
+/**
+ * docFileName
+ * The file one command's page is written to, its path with the spaces turned into underscores
+ * @param path {string} - the command path, for instance "app config set"
+ * @return a fresh heap string, for instance "app_config_set.md"
+ **/
+export func docFileName(path: string) -> string {
+    // The path with every space replaced
+    under: string = replace_all(path, " ", "_")
+
+    // The name with its extension
+    out: string = under + ".md"
+    free(under)
+    return out
+}
+
+// Appends the Options block, the flags help puts under "Flags:" fenced under a markdown header
+func docPushOptions(sb: *StringBuilder, subject: *Command, wrap: int64) -> void {
+    // The flags to show and the names claimed
+    flags: *Vector<*Flag> = alloc(vec_new())
+    taken: *Vector<string> = alloc(vec_new())
+
+    // Collect the local flags then the own persistent flags
+    localf: *FlagSet = (*subject).flags
+    pfl: *FlagSet = (*subject).pflags
+    docCollectVisible(flags, taken, localf)
+    docCollectVisible(flags, taken, pfl)
+
+    // The description of the --help line, which the synthesized flag borrows
+    synthHelp: string = helpFlagHelp(subject)
+
+    // Synthesize the --help flag when none is declared, the set lives until the lines are pushed
+    synth: *FlagSet = flagsetNew()
+    if !vec_contains(taken, "help") {
+        synth.addBool("help", "h", false, synthHelp)
+        vec_push(flags, synth.get(0))
+    }
+
+    // Sort and append the fenced block when there is something to show
+    if vec_len(flags) > 0 {
+        vec_sort(flags, docFlagCmp)
+        sb_push(sb, "### Options\n\n```\n")
+        docPushFlagLines(sb, flags, wrap)
+        sb_push(sb, "```\n\n")
+    }
+
+    // Free the synthesized set, its description and the two vectors, the flags and names inside are borrowed
+    synth.freeAll()
+    free(synth)
+    free(synthHelp)
+    vec_free(flags)
+    free(flags)
+    vec_free(taken)
+    free(taken)
+}
+
+// Appends the inherited options block, the flags help puts under "Global Flags:"
+func docPushInherited(sb: *StringBuilder, chain: *Vector<*Command>, wrap: int64) -> void {
+    // The flags to show and the names claimed
+    flags: *Vector<*Flag> = alloc(vec_new())
+    taken: *Vector<string> = alloc(vec_new())
+
+    // The leaf on the chain
+    n: int64 = vec_len(chain)
+    leaf: *Command = vec_get(chain, n - 1)
+
+    // Claim the names of the leaf's own flags
+    own: *Vector<*Flag> = alloc(vec_new())
+    localf: *FlagSet = (*leaf).flags
+    pfl: *FlagSet = (*leaf).pflags
+    docCollectVisible(own, taken, localf)
+    docCollectVisible(own, taken, pfl)
+
+    // Collect the ancestors' persistent flags, nearest first
+    mut i: int64 = n - 2
+    while i >= 0 {
+        c: *Command = vec_get(chain, i)
+        pf: *FlagSet = (*c).pflags
+        docCollectVisible(flags, taken, pf)
+        i = i - 1
+    }
+
+    // Sort and append the fenced block when there is something to show
+    if vec_len(flags) > 0 {
+        vec_sort(flags, docFlagCmp)
+        sb_push(sb, "### Options inherited from parent commands\n\n```\n")
+        docPushFlagLines(sb, flags, wrap)
+        sb_push(sb, "```\n\n")
+    }
+
+    // Free the three vectors, the flags and names inside are borrowed
+    vec_free(own)
+    free(own)
+    vec_free(flags)
+    free(flags)
+    vec_free(taken)
+    free(taken)
+}
+
+// Appends one "* [path](path.md)\t - short" link line
+func docPushLink(sb: *StringBuilder, path: string, short: string) -> void {
+    // The file the link points at
+    fname: string = docFileName(path)
+
+    // The bullet, the label, the link and the description
+    sb_push(sb, "* [")
+    sb_push(sb, path)
+    sb_push(sb, "](")
+    sb_push(sb, fname)
+    sb_push(sb, ")\t - ")
+    sb_push(sb, short)
+    sb_push(sb, "\n")
+    free(fname)
+}
+
+// Appends the SEE ALSO block, a link to the parent and one to each visible child
+func docPushSeeAlso(sb: *StringBuilder, subject: *Command, chain: *Vector<*Command>) -> void {
+    // The parent's path, empty for the root
+    parent: string = docParentPath(chain)
+    // The children the page links to
+    kids: *Vector<*Command> = cmdVisibleKids(subject)
+
+    // Nothing to link to means no block at all
+    if str_len(parent) > 0 || vec_len(kids) > 0 {
+        sb_push(sb, "### SEE ALSO\n\n")
+
+        // The parent comes first, the way Cobra orders them
+        if str_len(parent) > 0 {
+            p: *Command = vec_get(chain, vec_len(chain) - 2)
+            docPushLink(sb, parent, (*p).short)
+        }
+
+        // Then every visible child in name order
+        mut i: int64 = 0
+        while i < vec_len(kids) {
+            k: *Command = vec_get(kids, i)
+            docPushLink(sb, (*k).path, (*k).short)
+            i = i + 1
+        }
+        sb_push(sb, "\n")
+    }
+
+    // Free the list of shown children, the commands inside are borrowed
+    vec_free(kids)
+    free(kids)
+}
+
+/**
+ * docMarkdown
+ * Renders one command as a markdown page in the shape Cobra's doc.GenMarkdown writes
+ * @param subject {*Command} - the command to describe, its path already set by novaExecute
+ * @param chain {*Vector<*Command>} - the commands root..subject, borrowed
+ * @return a fresh heap string ending in a newline
+ **/
+export func docMarkdown(subject: *Command, chain: *Vector<*Command>) -> string {
+    // A builder for the page
+    sb: *StringBuilder = alloc(sb_new())
+
+    // The column the text is wrapped at, 0 when nothing on the chain asks for wrapping
+    wrap: int64 = cmdResolveWrapWidth(chain)
+
+    // The heading, which is the command path
+    sb_push(sb, "## ")
+    sb_push(sb, (*subject).path)
+    sb_push(sb, "\n\n")
+
+    // The short description under it
+    if (*subject).short != "" {
+        sb_push(sb, (*subject).short)
+        sb_push(sb, "\n\n")
+    }
+
+    // The long description under its own header
+    if (*subject).long != "" {
+        sb_push(sb, "### Synopsis\n\n")
+        sb_push(sb, (*subject).long)
+        sb_push(sb, "\n\n")
+    }
+
+    // The fenced use line, which only a command that runs has
+    if cmdIsRunnable(subject) {
+        ul: string = docUseLine(subject, chain)
+        sb_push(sb, "```\n")
+        sb_push(sb, ul)
+        sb_push(sb, "\n```\n\n")
+        free(ul)
+    }
+
+    // The fenced examples
+    if (*subject).example != "" {
+        sb_push(sb, "### Examples\n\n```\n")
+        sb_push(sb, (*subject).example)
+        sb_push(sb, "\n```\n\n")
+    }
+
+    // The two flag blocks, the same lines help prints
+    docPushOptions(sb, subject, wrap)
+    docPushInherited(sb, chain, wrap)
+
+    // The links to the parent and the children
+    docPushSeeAlso(sb, subject, chain)
+
+    // Copy the text out and free the builder
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return out
+}
+
+// Whether a path names a directory, so an existing one is not made twice
+func docIsDir(path: string) -> bool {
+    // Stat the path, keeping the error rather than returning it
+    st, e := file_stat(path)
+    if e.exists() {
+        e.ignore()
+        return false
+    }
+
+    // Mask the mode down to the file type and compare it against S_IFDIR
+    return (st.mode & docTypeMask()) == docDirBit()
+}
+
+// Makes a directory and every missing parent, the mkdir -p contract over std.fs make_dir
+func docMakeDir(path: string) -> error {
+    // An empty path names no directory to make
+    if str_len(path) == 0 {
+        return error { message: "docWriteTree: empty directory" }
+    }
+
+    // The path split into its components
+    parts: *Vector<string> = str_split(path, "/")
+    // How many components there are
+    n: int64 = vec_len(parts)
+
+    // The prefix built up so far
+    mut cur: string = ""
+    // Whether that prefix is a string this loop minted rather than one it borrowed
+    mut owned: bool = false
+    // Cursor over the components
+    mut i: int64 = 0
+    // The first failure, returned once the walk is done
+    mut failure: error = error {}
+    // Whether a failure has already been recorded
+    mut failed: bool = false
+
+    // Loop making each prefix of the path in turn
+    while i < n {
+        // The current component
+        part: string = vec_get(parts, i)
+        if str_len(part) == 0 {
+            // A leading empty component means the path was absolute
+            if i == 0 {
+                cur = "/"
+            }
+        } else {
+            // Append the component to the prefix, minding the root and joining in one step
+            if str_len(cur) == 0 {
+                // The first component, borrowed from the split rather than minted here
+                cur = part
+            } else if str_eq(cur, "/") {
+                // Under the root, where the prefix is the slash itself
+                next: string = "/" + part
+                cur = next
+                owned = true
+            } else {
+                // Anywhere else, where the prefix the turn before minted is freed once it is copied
+                next: string = textCat3(cur, "/", part)
+                if owned {
+                    free(cur)
+                }
+                cur = next
+                owned = true
+            }
+
+            // Make the prefix unless it is already a directory or the walk has failed
+            if !docIsDir(cur) && !failed {
+                e := make_dir(cur, mode_0755())
+                if e.exists() {
+                    failure = error { message: textCat4("mkdir ", cur, ": ", e.message) }
+                    failed = true
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    // Free the last prefix when it was minted here, then the components and their vector
+    if owned {
+        free(cur)
+    }
+    textFreeStrings(parts)
+    vec_free(parts)
+    free(parts)
+
+    // Empty when every level was made
+    return failure
+}
+
+// Writes one page to disk through open_file, write_bytes and close_file, looping over a short write
+func docWriteFile(path: string, text: string) -> error {
+    // Open the page for writing, truncating whatever was there before
+    fd, oe := open_file(path, o_wronly() | o_creat() | o_trunc(), mode_0644())
+    if oe.exists() {
+        return error { message: textCat4("cannot write ", path, ": ", oe.message) }
+    }
+
+    // How many bytes the page holds
+    n: int64 = str_len(text)
+
+    // How many of them have gone out
+    mut off: int64 = 0
+    // The failure that stopped the write
+    mut failure: error = error {}
+    // Whether one happened
+    mut failed: bool = false
+
+    // Loop until every byte is written, since a write may be short
+    while off < n && !failed {
+        // The bytes still to go, copied out so no pointer arithmetic is needed
+        chunk: string = substring(text, off, n)
+        // The C buffer write_bytes takes
+        buf: *raw char = cbuf(chunk)
+
+        // Write what is left
+        wrote, we := write_bytes(fd, buf, str_len(chunk))
+        free(buf)
+        free(chunk)
+
+        // Report a failed write, and treat a write of nothing as one too
+        if we.exists() {
+            failure = error { message: textCat4("cannot write ", path, ": ", we.message) }
+            failed = true
+        } else if wrote <= 0 {
+            failure = error { message: textCat3("cannot write ", path, ": wrote no bytes") }
+            failed = true
+        } else {
+            off = off + wrote
+        }
+    }
+
+    // Close the file, the close failure tells the caller nothing the write did not
+    ce := close_file(fd)
+    ce.ignore()
+
+    // Empty when every byte went out
+    return failure
+}
+
+// Writes one command's page and then every visible child's, depth first
+func docWriteNode(subject: *Command, chain: *Vector<*Command>, dir: string) -> error {
+    // The page itself
+    text: string = docMarkdown(subject, chain)
+    // The file it goes in
+    fname: string = docFileName((*subject).path)
+    // Where that file lives
+    path: string = path_join(dir, fname)
+
+    // Write it out
+    we := docWriteFile(path, text)
+    free(text)
+    free(fname)
+    free(path)
+    if we.exists() {
+        return we
+    }
+
+    // The children that get a page of their own
+    kids: *Vector<*Command> = cmdVisibleKids(subject)
+
+    // The first failure, returned once the children are done
+    mut failure: error = error {}
+    // Whether one happened
+    mut failed: bool = false
+    // Cursor over the children
+    mut i: int64 = 0
+
+    // Loop writing the page of each child under a chain one longer
+    while i < vec_len(kids) {
+        if !failed {
+            // The child and the chain root..child it is rendered against
+            k: *Command = vec_get(kids, i)
+            sub: *Vector<*Command> = alloc(vec_new())
+
+            // Copy the chain so far, then hang the child off the end
+            mut j: int64 = 0
+            while j < vec_len(chain) {
+                vec_push(sub, vec_get(chain, j))
+                j = j + 1
+            }
+            vec_push(sub, k)
+
+            // Write the child's page and everything under it
+            ke := docWriteNode(k, sub, dir)
+            vec_free(sub)
+            free(sub)
+            if ke.exists() {
+                failure = ke
+                failed = true
+            }
+        }
+        i = i + 1
+    }
+
+    // Free the list of shown children, the commands inside are borrowed
+    vec_free(kids)
+    free(kids)
+
+    // Empty when every page was written
+    return failure
+}
+
+/**
+ * docWriteTree
+ * Writes one markdown page per visible command under dir, making the directory when it is missing
+ * @param rootc {*Command} - the root command, its paths already set by novaExecute
+ * @param dir {string} - the directory the pages go in, made along with any missing parent
+ * @return an empty error on success, or the first mkdir or write failure
+ **/
+export func docWriteTree(rootc: *Command, dir: string) -> error {
+    // Make the directory before writing into it
+    me := docMakeDir(dir)
+    if me.exists() {
+        return me
+    }
+
+    // The chain the root is rendered against, which is the root alone
+    chain: *Vector<*Command> = alloc(vec_new())
+    vec_push(chain, rootc)
+
+    // Walk the tree writing a page per command
+    e := docWriteNode(rootc, chain, dir)
+
+    // Free the chain, the commands inside are borrowed
+    vec_free(chain)
+    free(chain)
+
+    // Whatever the walk made of it
+    return e
+}
+
+// The handler of the docs command, writes the tree under the directory the positional names
+func docCommandRun(ctx: *Context) -> int32 {
+    // The directory the pages go in, "docs" when none was typed
+    mut dir: string = "docs"
+    if ctx.nargs() > 0 {
+        dir = ctx.arg(0)
+    }
+
+    // Write a page per visible command, the docs command itself being hidden
+    e := docWriteTree((*ctx).root, dir)
+
+    // Report a failure the Cobra way and say nothing at all on success
+    if e.exists() {
+        return ctx.fail(e.message)
+    }
+
+    // Report success
+    return int32(0)
+}
+
+/**
+ * docCommandNew
+ * Builds the hidden docs [dir] command an application adds to its root to write its own markdown
+ * @return a fresh command, owned by the tree it is added to
+ **/
+export func docCommandNew() -> *Command {
+    // The command with its use and short
+    c: *Command = cmdNew("docs [dir]", "Generate markdown documentation")
+
+    // The long description shown by --help
+    c.setLong("Write one markdown page per command under the given directory, which defaults to docs.\nThe pages carry the same flag blocks --help prints, and a hidden or deprecated command gets no page of its own.")
+
+    // At most one positional, the directory
+    c.setArgs(argsMax(1))
+    // The handler
+    c.setRun(docCommandRun)
+    // Hidden, so an application's own help never lists it and it never documents itself
+    c.setHidden(true)
+
+    // Return the finished command
+    return c
+}

@@ -110,4 +110,29 @@ split_eq [k=] -> [k] [] true
 is_digit 0 true 9 true a false
 char_at [a] [c]
 is_one_char a true ab false empty false
+cat [a-b] [a-b!] [a-b-c]
+== sources ==
+words default config env flag
+eq same true eq other false
+env var APP_PORT MY_APP_LOG_LEVEL
+fresh host: source=default changed=false set=false
+bound APP_HOSTNAME
+apply host: ok
+env host: source=env changed=false set=true
+host example.org
+apply port: ok
+config port: source=config changed=false set=true
+port 9000
+apply port abc: err: invalid argument "abc" for "--port" flag: expected an integer
+port 9000
+apply emit wasm: err: invalid argument "wasm" for "--emit" flag: must be one of "llvm", "obj"
+apply emit obj: ok
+emit obj
+tags a|b c config
+set host: ok
+line host: source=flag changed=true set=true
+host typed.example
+reset host: source=default changed=false set=false
+reset port: source=default changed=false set=false
+host localhost port 8080 emit llvm tags 
 done

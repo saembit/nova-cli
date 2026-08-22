@@ -3,7 +3,8 @@
  * The project generator for nova, in the shape of cobra-cli
  *
  *     nova-cli init [name] [--dir path] [--source src] [--ref ref] [--no-fetch]
- *     nova-cli add <name> [--parent root] [--dir path]
+ *                    [--license mit|apache2|bsd3|none] [--author name] [--docs]
+ *     nova-cli add <name> [--parent root] [--dir path] [--flags spec]
  *     nova-cli version
  *
  * Build it with dusk build nova-cli.dusk, which drops the binary at
@@ -34,7 +35,7 @@
  **/
 func novacliVersion() -> string {
     // The one place the version number is written
-    return "0.2.0"
+    return "0.3.0"
 }
 
 /**
@@ -60,7 +61,7 @@ func novacliRoot() -> *Command {
     // The root command itself
     c: *Command = cmdNew("nova-cli", "Generate and extend nova applications")
     // The long description shown by --help
-    c.setLong("nova-cli scaffolds a nova application and adds commands to it, the way cobra-cli does for Cobra.\nStart with `nova-cli init --dir myapp`, then `nova-cli add serve --dir myapp`.")
+    c.setLong("nova-cli scaffolds a nova application and adds commands to it, the way cobra-cli does for Cobra.\nStart with `nova-cli init --dir myapp`, then `nova-cli add serve --dir myapp`.\nA command declares its flags with it, `nova-cli add serve --flags port/p:int=8080`, and a project gets its LICENSE and its own docs command from `nova-cli init --license mit --docs`.")
     // The version --version reports
     c.setVersion(novacliVersion())
 

@@ -321,9 +321,9 @@ Error: unknown command "completion" for "app2"
 Run 'app2 --help' for usage.
 == app2 completion bash -> 1
 
-Error: unsupported shell "fish"
+Error: unsupported shell "powershell"
 Run 'app3 completion --help' for usage.
-== app3 completion fish -> 1
+== app3 completion powershell -> 1
 
 Required persistent flag, with completion
 
@@ -433,3 +433,51 @@ Error: unknown command "bogus" for "app5"
 Run 'app5 --help' for usage.
 == app5 bogus -> 1
    error: unknown command "bogus" for "app5"
+
+## env and config binding
+go: name=world (default) port=8080 (default) tags= (default) quiet=false (default)
+== app6 go -> 0
+
+go: name=fromenv (env) port=9000 (env) tags=a|b (env) quiet=true (env)
+== app6 go, environment set -> 0
+
+go: name=typed (flag) port=9000 (env) tags=a|b (env) quiet=true (env)
+== app6 go -n typed -> 0
+
+Error: invalid argument "abc" for "--port" flag: expected an integer
+Run 'app6 go --help' for usage.
+== app6 go, APP6_PORT=abc -> 1
+
+Show where every value came from
+
+Usage:
+  app6 go [flags]
+
+Flags:
+  -h, --help           help for go
+  -n, --name string    who to greet (default "world")
+  -p, --port int       port to listen on (default 8080)
+      --tags strings   tags to attach
+
+Global Flags:
+      --config string   config file
+  -q, --quiet           say less
+== app6 help go, APP6_PORT=abc -> 0
+
+go: name=fromfile (config) port=42 (config) tags=x|y z (config) quiet=true (config)
+== app6 go --config exec_test_config.json -> 0
+
+go: name=fromenv (env) port=42 (config) tags=x|y z (config) quiet=true (config)
+== app6 go --config, APP6_NAME set -> 0
+
+Error: config exec_test_nope.json: cannot read file
+Run 'app6 go --help' for usage.
+== app6 go --config exec_test_nope.json -> 1
+   error: config exec_test_nope.json: cannot read file
+
+need: token=fromenv (env)
+== app6 need, APP6_TOKEN set -> 0
+
+Error: required flag(s) "token" not set
+Run 'app6 need --help' for usage.
+== app6 need -> 1

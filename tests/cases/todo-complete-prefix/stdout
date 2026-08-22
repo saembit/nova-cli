@@ -1,0 +1,8 @@
+add	Add a todo item
+completion	Generate the autocompletion script for the specified shell
+config	Manage configuration
+done	Mark a todo item done
+help	Help about any command
+list	List todo items
+ls	List todo items
+:4

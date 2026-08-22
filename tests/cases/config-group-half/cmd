@@ -1,0 +1,1 @@
+NOVA_TOKEN=s3cret NOVA_USER=ann config login

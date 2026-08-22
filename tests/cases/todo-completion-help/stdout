@@ -1,0 +1,26 @@
+Generate the autocompletion script for todo for the specified shell.
+
+The script calls todo itself for every candidate, so it keeps
+working when the commands change and never needs regenerating.
+
+bash:
+  source <(todo completion bash)
+  todo completion bash > /etc/bash_completion.d/todo
+
+zsh:
+  source <(todo completion zsh)
+  todo completion zsh > "${fpath[1]}/_todo"
+
+fish:
+  todo completion fish | source
+  todo completion fish > ~/.config/fish/completions/todo.fish
+
+Usage:
+  todo completion [bash|zsh|fish] [flags]
+
+Flags:
+  -h, --help              help for completion
+      --no-descriptions   disable completion descriptions
+
+Global Flags:
+  -v, --verbose   verbose output

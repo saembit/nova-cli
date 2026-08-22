@@ -1,0 +1,12 @@
+{
+  "name": "fromfile",
+  "port": 3000,
+  "rate": 2.5,
+  "tags": ["alpha", "beta gamma"],
+  "emit": "obj",
+  "level": 3,
+  "dry": true,
+  "verbose": true,
+  "nosuchflag": "ignored",
+  "serve": { "port": 9000, "host": "cfg.example" }
+}
