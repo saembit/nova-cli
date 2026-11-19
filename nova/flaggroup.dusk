@@ -44,6 +44,24 @@ export func flagGroupNew(kind: GroupKind, names: string) -> *FlagGroup {
 }
 
 /**
+ * flagGroupFreeNames
+ * Frees the names a group that never made it into a tree owns along with their vector, the owner frees the group itself after
+ * @param g {*FlagGroup} - the group, borrowed
+ * @return nothing
+ **/
+export func flagGroupFreeNames(g: *FlagGroup) -> void {
+    // The names the group owns
+    gnames: *Vector<string> = (*g).names
+
+    // Free every name
+    textFreeStrings(gnames)
+
+    // Free the name vector
+    vec_free(gnames)
+    free((*g).names)
+}
+
+/**
  * flagGroupBracket
  * Joins names with single spaces inside one pair of square brackets, the shape Cobra prints a group in
  * @param v {*Vector<string>} - the names, borrowed

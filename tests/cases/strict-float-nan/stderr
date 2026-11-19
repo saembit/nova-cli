@@ -1,0 +1,2 @@
+Error: invalid argument "nan" for "--rate" flag: expected a number
+Run 'strict show --help' for usage.

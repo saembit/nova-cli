@@ -1,0 +1,7 @@
+name=bob (flag)
+port=9 (flag)
+rate=0.25 (flag)
+tags=[a,b,c]
+loud=3
+mode=safe
+args=[x,y]

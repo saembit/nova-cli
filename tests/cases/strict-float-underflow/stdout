@@ -1,0 +1,7 @@
+name=world (default)
+port=8080 (default)
+rate=0 (flag)
+tags=[]
+loud=0
+mode=fast
+args=[]

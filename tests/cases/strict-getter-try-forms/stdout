@@ -1,0 +1,4 @@
+tryGetStr: no flag named '--missing' (value "")
+tryGetInt: no flag named '--name' (value 0)
+tryArg: positional index 3 is out of range, the command got 0 (value "")
+cmdTryChild: child index 99 is out of range, the command has 9 children (parent strict)

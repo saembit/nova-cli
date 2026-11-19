@@ -1,0 +1,19 @@
+strict reads no environment variable and opens no file, and every limit is set low
+so each one can be shown going over.
+
+Usage:
+  strict [command]
+
+Available Commands:
+  big         A command with too much to say
+  completion  Generate the autocompletion script for the specified shell
+  getter      Show the try getters handing back errors
+  help        Help about any command
+  nest        The second level
+  refuse      Show a strict tree refusing every binding
+  show        Print every flag and where its value came from
+
+Flags:
+  -h, --help   help for strict
+
+Use "strict [command] --help" for more information about a command.

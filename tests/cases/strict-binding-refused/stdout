@@ -1,0 +1,19 @@
+side trySetEnvPrefix: refused: env prefix "STRICT" is not allowed under strict mode
+side trySetConfigFile: refused: config file "examples/strict/strict.json" is not allowed under strict mode
+side trySetConfigFlag: refused: config flag "--config" is not allowed under strict mode
+child tryAddStr: accepted
+child tryBindEnv: accepted
+child trySetEnvPrefix: accepted
+child trySetConfigFile: accepted
+side tryAddCommand child: accepted
+side tryAddCommand docs: accepted
+novaValidate:
+flag '--name' of 'side child' is bound to an environment variable, which is not allowed under strict mode
+env prefix on 'side child' is not allowed under strict mode
+config file on 'side child' is not allowed under strict mode
+command 'side docs' writes files, which is not allowed under strict mode
+novaExecuteE: exit 1, the child never ran, the err sink got:
+Error: flag '--name' of 'side child' is bound to an environment variable, which is not allowed under strict mode
+env prefix on 'side child' is not allowed under strict mode
+config file on 'side child' is not allowed under strict mode
+command 'side docs' writes files, which is not allowed under strict mode

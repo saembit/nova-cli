@@ -95,7 +95,7 @@ func configReadEnv(f: *Flag, varName: string) -> error {
 
 /**
  * configApplyEnv
- * Gives every flag the command line left alone the value of its environment variable, the one it was bound to by name or the one the prefix names for it
+ * Gives every flag the command line left alone the value of its environment variable, the one it was bound to by name or the one the prefix names for it, it sees no root so it has no strict gate of its own, configApply holds it back under a strict root and nothing else in nova calls it
  * @param flags {*Vector<*Flag>} - the effective flags of the run, borrowed
  * @param prefix {string} - the resolved env prefix, "" when only explicit bindings are read
  * @return a clean error, or the invalid argument message a value the kind refuses earns
@@ -409,12 +409,18 @@ func configWalk(flags: *Vector<*Flag>, rootj: *Json, name: string, path: string)
 
 /**
  * configApplyFile
- * Reads the config file the chain names and gives every flag neither the command line nor the environment set the value the file holds for it
+ * Reads the config file the chain names and gives every flag neither the command line nor the environment set the value the file holds for it, nothing at all under a strict root
  * @param flags {*Vector<*Flag>} - the effective flags of the run, borrowed
  * @param chain {*Vector<*Command>} - the commands root..leaf, borrowed
  * @return a clean error, or the "config <path>: <reason>" message the file earned
  **/
 export func configApplyFile(flags: *Vector<*Flag>, chain: *Vector<*Command>) -> error {
+    // A strict root opens no file, the same gate configApply has for a caller that comes in here directly
+    rootc: *Command = vec_get(chain, 0)
+    if (*rootc).strict {
+        return error {}
+    }
+
     // The leaf of the chain, whose name a section is keyed by
     leaf: *Command = vec_get(chain, vec_len(chain) - 1)
 
@@ -488,11 +494,17 @@ export func configApplyFile(flags: *Vector<*Flag>, chain: *Vector<*Command>) -> 
 
 /**
  * configApply
- * Gives the flags of a run everything the command line did not, the environment first and the config file after it, so a value on the line wins over one in the environment and that wins over one in the file
+ * Gives the flags of a run everything the command line did not, the environment first and the config file after it, so a value on the line wins over one in the environment and that wins over one in the file, under a strict root it returns at once and reads nothing, the one gate in front of the only env() call and the only read_file call in the library
  * @param chain {*Vector<*Command>} - the commands root..leaf, borrowed
  * @return a clean error, or the first message a value the run refuses earned, whose string the caller takes over
  **/
 export func configApply(chain: *Vector<*Command>) -> error {
+    // A strict root reads neither the environment nor any file, whatever the tree declares
+    rootc: *Command = vec_get(chain, 0)
+    if (*rootc).strict {
+        return error {}
+    }
+
     // Every flag the leaf can take, nearest declaration first
     flags: *Vector<*Flag> = alloc(vec_new())
     configEffective(flags, chain)

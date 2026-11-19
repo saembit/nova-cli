@@ -1,6 +1,7 @@
 /**
  * nova/exec.dusk
  * novaExecuteE and novaExecute, the entry points an application's main calls with its root command and argv
+ * Before a word of argv is scanned a strict root has its tree validated and a bad tree refused, then argv is held to the root's argument count and argument length limits, and the scan itself holds the run to the depth and flag value limits, every one of them an ordinary error with exit code 1
  **/
 @paradigm oop
 @paradigm procedural
@@ -18,8 +19,10 @@
 @import help
 @import completion
 @import parse
+@import limits
+@import validate
 
-// Walks the whole tree, sets every path, resets every flag and adds the builtin commands and --version flag
+// Walks the tree down to the depth limit, sets every path, resets every flag and adds the builtin commands and --version flag, the plain addCommand and addBool cannot abort here since each one is guarded by the same lookup their try forms run
 func execFixup(rootc: *Command) -> void {
     // Add the builtin help command when it applies
     if !(*rootc).disableHelpCmd && rootc.numChildren() > 0 && rootc.findChild("help") < 0 {
@@ -53,21 +56,33 @@ func execFixup(rootc: *Command) -> void {
     // The root path is its name
     (*rootc).path = (*rootc).name
 
-    // The worklist of commands to visit
+    // The worklist of commands to visit and how deep each one sits, the root being one
     work: *Vector<*Command> = alloc(vec_new())
+    depths: *Vector<int64> = alloc(vec_new())
     vec_push(work, rootc)
+    vec_push(depths, 1)
+
+    // The deepest a run can reach, nothing below it is ever scanned so nothing below it is visited, which also ends the walk over a tree linked into a loop
+    limit: int64 = novaMaxDepth(rootc)
 
     // Loop over the worklist
     mut w: int64 = 0
     while w < vec_len(work) {
-        // The current command
+        // The current command and its depth
         c: *Command = vec_get(work, w)
+        d: int64 = vec_get(depths, w)
 
         // Reset its local and persistent flags
         lf: *FlagSet = (*c).flags
         pf: *FlagSet = (*c).pflags
         lf.reset()
         pf.reset()
+
+        // A command at the depth limit has no children a run can reach
+        if d >= limit {
+            w = w + 1
+            continue
+        }
 
         // Set the path of each child and queue it
         kids: *Vector<*Command> = (*c).kids
@@ -84,14 +99,17 @@ func execFixup(rootc: *Command) -> void {
             (*k).path = textCat3((*c).path, " ", (*k).name)
             (*k).pathOwned = true
             vec_push(work, k)
+            vec_push(depths, d + 1)
             i = i + 1
         }
         w = w + 1
     }
 
-    // Free the worklist, whose commands belong to the tree
+    // Free the worklist, whose commands belong to the tree, and the depths
     vec_free(work)
     free(work)
+    vec_free(depths)
+    free(depths)
 }
 
 // Reports an error nova itself built against a command and takes its message over, freeing the one the last call left on the root so a run leaks nothing and the error handed back still reads
@@ -99,17 +117,110 @@ func execFail(rootc: *Command, chain: *Vector<*Command>, target: *Command, e: er
     // Report it the Cobra way through the err sink the chain resolves
     code: int32 = ctxReportError(chain, target, e.message)
 
+    // Keep this one in its place until the next call or novaFreeTree
+    execKeepMsg(rootc, e.message)
+
+    // Hand the exit code and the error back
+    return (code, e)
+}
+
+// Keeps a message nova reported on the root until the next call or novaFreeTree, freeing the one the last call left
+func execKeepMsg(rootc: *Command, msg: string) -> void {
     // Free the message the last call left behind
     if (*rootc).hasErrMsg {
         free((*rootc).errMsg)
     }
 
-    // Keep this one in its place until the next call or novaFreeTree
-    (*rootc).errMsg = e.message
+    // Keep this one in its place
+    (*rootc).errMsg = msg
     (*rootc).hasErrMsg = true
+}
 
-    // Hand the exit code and the error back
-    return (code, e)
+// Reports an error that belongs to the run as a whole against the root, the usage hint and the silence flags applying as they do to any error
+func execFailRoot(rootc: *Command, e: error) -> (int32, error) {
+    // The chain the sinks resolve along, the root alone
+    chain: *Vector<*Command> = alloc(vec_new())
+    vec_push(chain, rootc)
+
+    // Report it the usual way
+    code, re := execFail(rootc, chain, rootc, e)
+
+    // Free the chain, the root belongs to the tree
+    vec_free(chain)
+    free(chain)
+    return (code, re)
+}
+
+// Refuses to run a tree novaValidate found problems in, "Error: <problems>" on the root's err sink unless errors are silenced and no usage hint, since no argument the user typed is at fault
+func execRefuse(rootc: *Command, e: error) -> (int32, error) {
+    // The chain the sinks resolve along, the root alone
+    chain: *Vector<*Command> = alloc(vec_new())
+    vec_push(chain, rootc)
+
+    // Write the error line unless silenced
+    if !(*rootc).silenceErrors {
+        line: string = textCat3("Error: ", e.message, "\n")
+        sinkWrite(sinkResolveErr(chain), line)
+        free(line)
+    }
+
+    // Free the chain and keep the message on the root
+    vec_free(chain)
+    free(chain)
+    execKeepMsg(rootc, e.message)
+    return (1, e)
+}
+
+// Builds "<a><n1><b><n2><c><n3>" as a fresh heap error message, a negative n3 leaving the last number out
+func execNumMsg(a: string, n1: int64, b: string, n2: int64, c: string, n3: int64) -> error {
+    // Builder for the message
+    sb: *StringBuilder = alloc(sb_new())
+
+    // Push the pieces in order
+    sb_push(sb, a)
+    sb_push_int(sb, n1)
+    sb_push(sb, b)
+    sb_push_int(sb, n2)
+    sb_push(sb, c)
+    if n3 >= 0 {
+        sb_push_int(sb, n3)
+    }
+
+    // Copy the builder out and free it
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return error { message: out }
+}
+
+/**
+ * execCheckArgv
+ * Holds argv to the root's limits, how many entries follow the program name and how many bytes each one holds, before a word of it is scanned
+ * @param rootc {*Command} - the root command whose limits apply
+ * @param argv {string[]} - the raw argv, argv[0] is the program name and is not counted
+ * @return a clean error, or "too many arguments: N given, the limit is M" or "argument I is N bytes, the limit is M"
+ **/
+func execCheckArgv(rootc: *Command, argv: string[]) -> error {
+    // How many entries follow the program name
+    n: int64 = argv.len - 1
+    maxArgs: int64 = novaMaxArgs(rootc)
+    if n > maxArgs {
+        return execNumMsg("too many arguments: ", n, " given, the limit is ", maxArgs, "", -1)
+    }
+
+    // Every entry after the program name, by its byte length
+    maxLen: int64 = novaMaxArgLen(rootc)
+    mut i: int64 = 1
+    while i < argv.len {
+        size: int64 = str_len(argv[i])
+        if size > maxLen {
+            return execNumMsg("argument ", i, " is ", size, " bytes, the limit is ", maxLen)
+        }
+        i = i + 1
+    }
+
+    // Every entry is within bounds
+    return error {}
 }
 
 /**
@@ -343,14 +454,28 @@ func execRunDispatch(rootc: *Command, st: *ParseState, ctx: *Context, perr: erro
     pos: *Vector<string> = (*ctx).args
     curc: *Command = (*ctx).cmd
 
+    // A line that names commands deeper than the depth limit is refused before anything else, the flag error pass two may have met on the way included
+    if (*st).tooDeep {
+        if perr.exists() {
+            free(perr.message)
+        }
+        ls: string = int_to_string(novaMaxDepth(rootc))
+        msg: string = textCat3("commands nest deeper than the limit of ", ls, "")
+        free(ls)
+        return execFail(rootc, chain, curc, error { message: msg })
+    }
+
     // Report a flag error
     if perr.exists() {
         return execFail(rootc, chain, curc, perr)
     }
 
-    // Print help when it was asked for
+    // Print help when it was asked for, a default rendering over the help limit being the run's error
     if (*st).helpRequested {
-        helpDispatch(ctx)
+        he: error = helpDispatchE(ctx)
+        if he.exists() {
+            return execFail(rootc, chain, curc, he)
+        }
         return (0, error {})
     }
 
@@ -369,7 +494,10 @@ func execRunDispatch(rootc: *Command, st: *ParseState, ctx: *Context, perr: erro
         if vec_len(pos) > 0 {
             return execUnknownCommand(rootc, chain, curc, vec_get(pos, 0))
         }
-        helpDispatch(ctx)
+        he2: error = helpDispatchE(ctx)
+        if he2.exists() {
+            return execFail(rootc, chain, curc, he2)
+        }
         return (0, error {})
     }
 
@@ -454,13 +582,28 @@ func execDispatch(rootc: *Command, st: *ParseState, argv: string[]) -> (int32, e
 /**
  * novaExecuteE
  * Fixes up the tree, finds the command argv names, parses its flags and runs it, handing back the error it reported along with the exit code, the scanner state and the Context live only for this call and are freed before it returns
+ * Under a strict root the tree is validated first and a tree with problems is refused with exit code 1 before argv is looked at, then for any root argv is held to the limits in limits.dusk, so with a tree built from the try forms and passing novaValidate no argv at all makes this abort, everything argv can trigger is an Error: line and exit code 1
  * @param rootc {*Command} - the root command of the tree
  * @param argv {string[]} - the raw argv, argv[0] is the program name and is skipped
  * @return the exit code and the error already printed per the silence flags, a clean error after help, the version line and a successful run, the message of an error nova itself built belonging to the tree and reading until the next call on the same root or novaFreeTree
  **/
 export func novaExecuteE(rootc: *Command, argv: string[]) -> (int32, error) {
+    // A strict root runs only a tree novaValidate finds nothing wrong with
+    if (*rootc).strict {
+        ve: error = novaValidate(rootc)
+        if ve.exists() {
+            return execRefuse(rootc, ve)
+        }
+    }
+
     // Fix up the tree before scanning
     execFixup(rootc)
+
+    // Hold argv to the root's limits before a word of it is scanned
+    ae: error = execCheckArgv(rootc, argv)
+    if ae.exists() {
+        return execFailRoot(rootc, ae)
+    }
 
     // The scanner state for this call
     st: *ParseState = parseStateNew(rootc, argv)

@@ -1,7 +1,7 @@
 /**
  * nova/flagset.dusk
  * The flags a command declares, a FlagSet is a registry of bool, string, int, float, string slice, count and choice flags with optional one character shorthands, looked up by long name or shorthand and set from raw command line text one token at a time by the executor
- * Bad input is an error value the executor reports, misuse of the library such as a duplicate flag, a getter on the wrong kind, etc. aborts with "fatal: nova: ..." on stderr
+ * Bad input is an error value the executor reports, misuse of the library such as a duplicate flag, a getter on the wrong kind, etc. is an error value from the try forms (tryAddStr, tryGetStr, tryMarkRequired, ...) and aborts with "fatal: nova: ..." on stderr from the plain forms, which are thin wrappers over them
  **/
 @paradigm oop
 @paradigm procedural
@@ -9,6 +9,7 @@
 @import std.string
 @import std.vector
 @import text
+@import number
 
 /**
  * FlagKind
@@ -56,9 +57,11 @@ export struct Flag {
 /**
  * FlagSet
  * A set of flags in declaration order, build with flagsetNew() and pass by pointer, freeAll frees the flags and the item vector and the owner frees the set itself, novaFreeTree does both for every set in a tree
+ * none is an empty list the set owns and never fills, what tryGetStrs hands back beside its error so the caller always gets a vector it can read
  **/
 export struct FlagSet {
     items: *Vector<*Flag>,
+    none: *Vector<string>,
 }
 
 /**
@@ -70,8 +73,11 @@ export func flagsetNew() -> *FlagSet {
     // The empty item vector
     v: *Vector<*Flag> = alloc(vec_new())
 
+    // The empty list a failed tryGetStrs hands back
+    none: *Vector<string> = alloc(vec_new())
+
     // Return the new set
-    return alloc(FlagSet { items: v })
+    return alloc(FlagSet { items: v, none: none })
 }
 
 /**
@@ -409,18 +415,18 @@ func flagStore(f: *Flag, raw: string, fresh: bool) -> error {
             flagHold(f, raw)
         },
         KInt => {
-            // Parse the int
-            n, e := parse_int(raw)
+            // Parse the int under the grammar number.dusk states
+            n, e := textParseInt(raw)
             if e.exists() {
-                return flagInvalidArg(raw, (*f).name, "expected an integer")
+                return flagInvalidArg(raw, (*f).name, e.message)
             }
             (*f).valI = n
         },
         KFloat => {
-            // Parse the number
-            x, e := parse_float(raw)
+            // Parse the number under the grammar number.dusk states
+            x, e := textParseFloat(raw)
             if e.exists() {
-                return flagInvalidArg(raw, (*f).name, "expected a number")
+                return flagInvalidArg(raw, (*f).name, e.message)
             }
             (*f).valF = x
         },
@@ -434,10 +440,10 @@ func flagStore(f: *Flag, raw: string, fresh: bool) -> error {
             textPushCommas((*f).valV, raw)
         },
         KCount => {
-            // Parse the count the "=N" form carries
-            n, e := parse_int(raw)
+            // Parse the count the "=N" form carries, under the same grammar an int takes
+            n, e := textParseInt(raw)
             if e.exists() {
-                return flagInvalidArg(raw, (*f).name, "expected an integer")
+                return flagInvalidArg(raw, (*f).name, e.message)
             }
             (*f).valI = n
         },
@@ -517,6 +523,46 @@ export func flagApplyStrs(f: *Flag, items: *Vector<string>, src: FlagSource) -> 
 
     // Record where the value came from
     (*f).source = src
+}
+
+/**
+ * flagNameShapeErr
+ * Checks a long name and a shorthand have a shape the parser can reach, a long name is not empty, does not start with a dash and holds no "=", a shorthand is "" or one byte that is not a dash, an "=" or a digit
+ * @param name {string} - the long name, borrowed
+ * @param short {string} - the shorthand or "", borrowed
+ * @return a clean error, or the reason the shape is refused
+ **/
+export func flagNameShapeErr(name: string, short: string) -> error {
+    // An empty long name could never be typed
+    if name == "" {
+        return error { message: textCat3("flag with an empty name", "", "") }
+    }
+
+    // A leading dash or an "=" would be read as syntax rather than as the name
+    if starts_with(name, "-") || str_contains(name, "=") {
+        return error { message: textCat3("flag name '", name, "' starts with a dash or holds an \"=\"") }
+    }
+
+    // No shorthand is always fine
+    if short == "" {
+        return error {}
+    }
+
+    // The shorthand must be one character
+    if !textIsOneChar(short) {
+        return error { message: textCat3("shorthand for flag '--", name, "' must be one character") }
+    }
+
+    // A dash, an "=" or a digit is read as something else in a cluster
+    if short == "-" || short == "=" || textIsDigit(short[0]) {
+        head: string = textCat3("shorthand '", short, "' for flag '--")
+        msg: string = textCat3(head, name, "' cannot be parsed")
+        free(head)
+        return error { message: msg }
+    }
+
+    // The shape is fine
+    return error {}
 }
 
 impl FlagSet {
@@ -618,131 +664,159 @@ impl FlagSet {
     }
 
     /**
+     * checkNewE
+     * Checks a long name and a shorthand can be declared in this set, the shape of each and that neither is taken already
+     * @param name {string} - the long name
+     * @param short {string} - the shorthand or ""
+     * @return a clean error, or the reason the pair cannot be declared
+     **/
+    func checkNewE(name: string, short: string) -> error {
+        // A name the parser could never reach is refused
+        shape: error = flagNameShapeErr(name, short)
+        if shape.exists() {
+            return shape
+        }
+
+        // A duplicate long name is refused
+        if self.find(name) >= 0 {
+            return error { message: textCat3("flag '--", name, "' already defined") }
+        }
+
+        // No shorthand means nothing more to check
+        if short == "" {
+            return error {}
+        }
+
+        // The index of a flag already using the shorthand or -1
+        j: int64 = self.findShort(short)
+
+        // A duplicate shorthand is refused
+        if j >= 0 {
+            other: *Flag = self.get(j)
+            head: string = textCat3("shorthand '-", short, "' already used for flag '--")
+            msg: string = textCat3(head, (*other).name, "'")
+            free(head)
+            return error { message: msg }
+        }
+
+        // The pair is free
+        return error {}
+    }
+
+    /**
      * checkNew
-     * Aborts on a duplicate long name, a duplicate shorthand or a shorthand longer than one character
+     * Aborts on a duplicate long name, a duplicate shorthand or a name or shorthand the parser could never reach, the aborting form of checkNewE
      * @param name {string} - the long name
      * @param short {string} - the shorthand or ""
      * @return nothing
      **/
     func checkNew(name: string, short: string) -> void {
-        // A duplicate long name is a fault
-        if self.find(name) >= 0 {
-            novaFault("flag '--", name, "' already defined")
-        }
-
-        // Check the shorthand when there is one
-        if short != "" {
-            // The shorthand must be one character
-            if !textIsOneChar(short) {
-                novaFault("shorthand for flag '--", name, "' must be one character")
-            }
-
-            // The index of a flag already using the shorthand or -1
-            j: int64 = self.findShort(short)
-
-            // A duplicate shorthand is a fault
-            if j >= 0 {
-                other: *Flag = self.get(j)
-                novaFault("shorthand '-" + short + "' already used for flag '--", (*other).name, "'")
-            }
+        // Abort with whatever checkNewE refused
+        e: error = self.checkNewE(name, short)
+        if e.exists() {
+            novaFaultMsg(e.message)
         }
     }
 
     /**
-     * addBool
-     * Declares a bool flag
+     * tryAddBool
+     * Declares a bool flag, or hands back why it cannot be declared and leaves the set alone
      * @param name {string} - the long name
      * @param short {string} - one character or ""
      * @param def {bool} - the default
      * @param help {string} - the help text
-     * @return nothing
+     * @return a clean error, or the reason the flag was refused
      **/
-    func addBool(name: string, short: string, def: bool, help: string) -> void {
+    func tryAddBool(name: string, short: string, def: bool, help: string) -> error {
         // Check the names are free
-        self.checkNew(name, short)
-
-        // The item vector
-        items: *Vector<*Flag> = self.items
+        e: error = self.checkNewE(name, short)
+        if e.exists() {
+            return e
+        }
 
         // Push the new flag
-        vec_push(items, flagMake(name, short, FlagKind.KBool, help, def, "", 0, 0.0))
+        vec_push(self.items, flagMake(name, short, FlagKind.KBool, help, def, "", 0, 0.0))
+        return error {}
     }
 
     /**
-     * addStr
-     * Declares a string flag
+     * tryAddStr
+     * Declares a string flag, or hands back why it cannot be declared and leaves the set alone
      * @param name {string} - the long name
      * @param short {string} - one character or ""
      * @param def {string} - the default
      * @param help {string} - the help text
-     * @return nothing
+     * @return a clean error, or the reason the flag was refused
      **/
-    func addStr(name: string, short: string, def: string, help: string) -> void {
+    func tryAddStr(name: string, short: string, def: string, help: string) -> error {
         // Check the names are free
-        self.checkNew(name, short)
-
-        // The item vector
-        items: *Vector<*Flag> = self.items
+        e: error = self.checkNewE(name, short)
+        if e.exists() {
+            return e
+        }
 
         // Push the new flag
-        vec_push(items, flagMake(name, short, FlagKind.KStr, help, false, def, 0, 0.0))
+        vec_push(self.items, flagMake(name, short, FlagKind.KStr, help, false, def, 0, 0.0))
+        return error {}
     }
 
     /**
-     * addInt
-     * Declares an int flag
+     * tryAddInt
+     * Declares an int flag, or hands back why it cannot be declared and leaves the set alone
      * @param name {string} - the long name
      * @param short {string} - one character or ""
      * @param def {int64} - the default
      * @param help {string} - the help text
-     * @return nothing
+     * @return a clean error, or the reason the flag was refused
      **/
-    func addInt(name: string, short: string, def: int64, help: string) -> void {
+    func tryAddInt(name: string, short: string, def: int64, help: string) -> error {
         // Check the names are free
-        self.checkNew(name, short)
-
-        // The item vector
-        items: *Vector<*Flag> = self.items
+        e: error = self.checkNewE(name, short)
+        if e.exists() {
+            return e
+        }
 
         // Push the new flag
-        vec_push(items, flagMake(name, short, FlagKind.KInt, help, false, "", def, 0.0))
+        vec_push(self.items, flagMake(name, short, FlagKind.KInt, help, false, "", def, 0.0))
+        return error {}
     }
 
     /**
-     * addFloat
-     * Declares a float flag
+     * tryAddFloat
+     * Declares a float flag, or hands back why it cannot be declared and leaves the set alone
      * @param name {string} - the long name
      * @param short {string} - one character or ""
      * @param def {float64} - the default
      * @param help {string} - the help text
-     * @return nothing
+     * @return a clean error, or the reason the flag was refused
      **/
-    func addFloat(name: string, short: string, def: float64, help: string) -> void {
+    func tryAddFloat(name: string, short: string, def: float64, help: string) -> error {
         // Check the names are free
-        self.checkNew(name, short)
-
-        // The item vector
-        items: *Vector<*Flag> = self.items
+        e: error = self.checkNewE(name, short)
+        if e.exists() {
+            return e
+        }
 
         // Push the new flag
-        vec_push(items, flagMake(name, short, FlagKind.KFloat, help, false, "", 0, def))
+        vec_push(self.items, flagMake(name, short, FlagKind.KFloat, help, false, "", 0, def))
+        return error {}
     }
 
     /**
-     * addStrs
-     * Declares a string slice flag whose default is written as a comma separated list, "" being the empty list
+     * tryAddStrs
+     * Declares a string slice flag whose default is a comma separated list, or hands back why it cannot be declared and leaves the set alone
      * @param name {string} - the long name
      * @param short {string} - one character or ""
-     * @param def {string} - the default items, comma separated
+     * @param def {string} - the default items, comma separated, "" being the empty list
      * @param help {string} - the help text
-     * @return nothing
+     * @return a clean error, or the reason the flag was refused
      **/
-    func addStrs(name: string, short: string, def: string, help: string) -> void {
+    func tryAddStrs(name: string, short: string, def: string, help: string) -> error {
         // Check the names are free
-        self.checkNew(name, short)
-
-        // The item vector
-        items: *Vector<*Flag> = self.items
+        e: error = self.checkNewE(name, short)
+        if e.exists() {
+            return e
+        }
 
         // The new flag
         f: *Flag = flagMake(name, short, FlagKind.KStrs, help, false, "", 0, 0.0)
@@ -752,31 +826,167 @@ impl FlagSet {
         textPushCommas((*f).valV, def)
 
         // Push the new flag
-        vec_push(items, f)
+        vec_push(self.items, f)
+        return error {}
+    }
+
+    /**
+     * tryAddCount
+     * Declares a count flag that starts at zero, or hands back why it cannot be declared and leaves the set alone
+     * @param name {string} - the long name
+     * @param short {string} - one character or ""
+     * @param help {string} - the help text
+     * @return a clean error, or the reason the flag was refused
+     **/
+    func tryAddCount(name: string, short: string, help: string) -> error {
+        // Check the names are free
+        e: error = self.checkNewE(name, short)
+        if e.exists() {
+            return e
+        }
+
+        // Push the new flag
+        vec_push(self.items, flagMake(name, short, FlagKind.KCount, help, false, "", 0, 0.0))
+        return error {}
+    }
+
+    /**
+     * tryAddChoice
+     * Declares a choice flag whose default must be one of a comma separated list, or hands back why it cannot be declared and leaves the set alone
+     * @param name {string} - the long name
+     * @param short {string} - one character or ""
+     * @param def {string} - the default, one of the choices
+     * @param choices {string} - the alternatives, comma separated
+     * @param help {string} - the help text
+     * @return a clean error, or the reason the flag was refused
+     **/
+    func tryAddChoice(name: string, short: string, def: string, choices: string, help: string) -> error {
+        // Check the names are free
+        e: error = self.checkNewE(name, short)
+        if e.exists() {
+            return e
+        }
+
+        // The new flag with the alternatives split into its choice list
+        f: *Flag = flagMake(name, short, FlagKind.KChoice, help, false, def, 0, 0.0)
+        textPushCommas((*f).choices, choices)
+
+        // A default outside the alternatives is refused and the flag thrown away
+        if !vec_contains((*f).choices, def) {
+            flagFreeLists(f)
+            free(f)
+            return error { message: textCat3("default for flag '--", name, "' is not one of its choices") }
+        }
+
+        // Push the new flag
+        vec_push(self.items, f)
+        return error {}
+    }
+
+    /**
+     * addBool
+     * Declares a bool flag, aborts where tryAddBool would hand back an error
+     * @param name {string} - the long name
+     * @param short {string} - one character or ""
+     * @param def {bool} - the default
+     * @param help {string} - the help text
+     * @return nothing
+     **/
+    func addBool(name: string, short: string, def: bool, help: string) -> void {
+        // Declare it and abort on a refusal
+        e: error = self.tryAddBool(name, short, def, help)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+    }
+
+    /**
+     * addStr
+     * Declares a string flag, aborts where tryAddStr would hand back an error
+     * @param name {string} - the long name
+     * @param short {string} - one character or ""
+     * @param def {string} - the default
+     * @param help {string} - the help text
+     * @return nothing
+     **/
+    func addStr(name: string, short: string, def: string, help: string) -> void {
+        // Declare it and abort on a refusal
+        e: error = self.tryAddStr(name, short, def, help)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+    }
+
+    /**
+     * addInt
+     * Declares an int flag, aborts where tryAddInt would hand back an error
+     * @param name {string} - the long name
+     * @param short {string} - one character or ""
+     * @param def {int64} - the default
+     * @param help {string} - the help text
+     * @return nothing
+     **/
+    func addInt(name: string, short: string, def: int64, help: string) -> void {
+        // Declare it and abort on a refusal
+        e: error = self.tryAddInt(name, short, def, help)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+    }
+
+    /**
+     * addFloat
+     * Declares a float flag, aborts where tryAddFloat would hand back an error
+     * @param name {string} - the long name
+     * @param short {string} - one character or ""
+     * @param def {float64} - the default
+     * @param help {string} - the help text
+     * @return nothing
+     **/
+    func addFloat(name: string, short: string, def: float64, help: string) -> void {
+        // Declare it and abort on a refusal
+        e: error = self.tryAddFloat(name, short, def, help)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+    }
+
+    /**
+     * addStrs
+     * Declares a string slice flag whose default is written as a comma separated list, "" being the empty list, aborts where tryAddStrs would hand back an error
+     * @param name {string} - the long name
+     * @param short {string} - one character or ""
+     * @param def {string} - the default items, comma separated
+     * @param help {string} - the help text
+     * @return nothing
+     **/
+    func addStrs(name: string, short: string, def: string, help: string) -> void {
+        // Declare it and abort on a refusal
+        e: error = self.tryAddStrs(name, short, def, help)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
     }
 
     /**
      * addCount
-     * Declares a count flag, one that counts how many times it was named and starts at zero
+     * Declares a count flag, one that counts how many times it was named and starts at zero, aborts where tryAddCount would hand back an error
      * @param name {string} - the long name
      * @param short {string} - one character or ""
      * @param help {string} - the help text
      * @return nothing
      **/
     func addCount(name: string, short: string, help: string) -> void {
-        // Check the names are free
-        self.checkNew(name, short)
-
-        // The item vector
-        items: *Vector<*Flag> = self.items
-
-        // Push the new flag
-        vec_push(items, flagMake(name, short, FlagKind.KCount, help, false, "", 0, 0.0))
+        // Declare it and abort on a refusal
+        e: error = self.tryAddCount(name, short, help)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
     }
 
     /**
      * addChoice
-     * Declares a choice flag, a string flag whose value must be one of a comma separated list, the default itself must be one of them
+     * Declares a choice flag, a string flag whose value must be one of a comma separated list, the default itself must be one of them, aborts where tryAddChoice would hand back an error
      * @param name {string} - the long name
      * @param short {string} - one character or ""
      * @param def {string} - the default, one of the choices
@@ -785,25 +995,72 @@ impl FlagSet {
      * @return nothing
      **/
     func addChoice(name: string, short: string, def: string, choices: string, help: string) -> void {
-        // Check the names are free
-        self.checkNew(name, short)
+        // Declare it and abort on a refusal
+        e: error = self.tryAddChoice(name, short, def, choices, help)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+    }
 
-        // The item vector
-        items: *Vector<*Flag> = self.items
+    /**
+     * findE
+     * Finds the index of the flag named name, or the error that names it as missing
+     * @param name {string} - the long name
+     * @return the index and a clean error, or -1 and "no flag named '--name'"
+     **/
+    func findE(name: string) -> (int64, error) {
+        // The index of the flag or -1
+        i: int64 = self.find(name)
 
-        // The new flag
-        f: *Flag = flagMake(name, short, FlagKind.KChoice, help, false, def, 0, 0.0)
+        // A missing flag is the error
+        if i < 0 {
+            return (-1, error { message: textCat3("no flag named '--", name, "'") })
+        }
+        return (i, error {})
+    }
 
-        // Split the alternatives into the choice list
-        textPushCommas((*f).choices, choices)
+    /**
+     * findKindE
+     * Finds the index of the flag named name when it is declared with kind kind, the lookup every typed try getter runs
+     * @param name {string} - the long name
+     * @param kind {FlagKind} - the kind it must have
+     * @param word {string} - the kind word used in the message
+     * @return the index and a clean error, or -1 and "no <word> flag named '--name'"
+     **/
+    func findKindE(name: string, kind: FlagKind, word: string) -> (int64, error) {
+        // The index of the flag or -1
+        i: int64 = self.find(name)
 
-        // A default outside the alternatives is a fault
-        if !vec_contains((*f).choices, def) {
-            novaFault("default for flag '--", name, "' is not one of its choices")
+        // A missing flag or one of another kind is the same error
+        if i < 0 || !flagKindEq((*self.get(i)).kind, kind) {
+            head: string = textCat3("no ", word, " flag named '--")
+            msg: string = textCat3(head, name, "'")
+            free(head)
+            return (-1, error { message: msg })
+        }
+        return (i, error {})
+    }
+
+    /**
+     * findStrLikeE
+     * Finds the index of the flag named name when it is declared as a string or as a choice, the two kinds tryGetStr reads
+     * @param name {string} - the long name
+     * @return the index and a clean error, or -1 and "no string flag named '--name'"
+     **/
+    func findStrLikeE(name: string) -> (int64, error) {
+        // The index of the flag or -1
+        i: int64 = self.find(name)
+
+        // Either kind that carries a string will do
+        if i >= 0 {
+            k: FlagKind = (*self.get(i)).kind
+            if flagKindEq(k, FlagKind.KStr) || flagKindEq(k, FlagKind.KChoice) {
+                return (i, error {})
+            }
         }
 
-        // Push the new flag
-        vec_push(items, f)
+        // Anything else is the error
+        return (-1, error { message: textCat3("no string flag named '--", name, "'") })
     }
 
     /**
@@ -813,12 +1070,10 @@ impl FlagSet {
      * @return the flag
      **/
     func require(name: string) -> *Flag {
-        // The index of the flag or -1
-        i: int64 = self.find(name)
-
-        // A missing flag is a fault
-        if i < 0 {
-            novaFault("no flag named '--", name, "'")
+        // The index of the flag, aborting when there is none
+        i, e := self.findE(name)
+        if e.exists() {
+            novaFaultMsg(e.message)
         }
 
         // Return the flag
@@ -834,24 +1089,14 @@ impl FlagSet {
      * @return the flag
      **/
     func requireKind(name: string, kind: FlagKind, word: string) -> *Flag {
-        // The index of the flag or -1
-        i: int64 = self.find(name)
-
-        // A missing flag is a fault
-        if i < 0 {
-            novaFault("no " + word + " flag named '--", name, "'")
-        }
-
-        // The flag
-        f: *Flag = self.get(i)
-
-        // The wrong kind is the same fault
-        if !flagKindEq((*f).kind, kind) {
-            novaFault("no " + word + " flag named '--", name, "'")
+        // The index of the flag, aborting when there is none of that kind
+        i, e := self.findKindE(name, kind, word)
+        if e.exists() {
+            novaFaultMsg(e.message)
         }
 
         // Return the flag
-        return f
+        return self.get(i)
     }
 
     /**
@@ -861,82 +1106,282 @@ impl FlagSet {
      * @return the flag
      **/
     func requireStrLike(name: string) -> *Flag {
-        // The index of the flag or -1
-        i: int64 = self.find(name)
-
-        // A missing flag is a fault
-        if i < 0 {
-            novaFault("no string flag named '--", name, "'")
-        }
-
-        // The flag
-        f: *Flag = self.get(i)
-
-        // A kind that carries no string is the same fault
-        if !flagKindEq((*f).kind, FlagKind.KStr) && !flagKindEq((*f).kind, FlagKind.KChoice) {
-            novaFault("no string flag named '--", name, "'")
+        // The index of the flag, aborting when it carries no string
+        i, e := self.findStrLikeE(name)
+        if e.exists() {
+            novaFaultMsg(e.message)
         }
 
         // Return the flag
-        return f
+        return self.get(i)
+    }
+
+    /**
+     * tryMarkRequired
+     * Marks name as required, the executor errors when it is not set
+     * @param name {string} - the long name
+     * @return a clean error, or "no flag named '--name'"
+     **/
+    func tryMarkRequired(name: string) -> error {
+        // The flag, or the error naming it as missing
+        i, e := self.findE(name)
+        if e.exists() {
+            return e
+        }
+
+        // Set the required bit
+        (*self.get(i)).required = true
+        return error {}
+    }
+
+    /**
+     * tryMarkHidden
+     * Hides name from help output
+     * @param name {string} - the long name
+     * @return a clean error, or "no flag named '--name'"
+     **/
+    func tryMarkHidden(name: string) -> error {
+        // The flag, or the error naming it as missing
+        i, e := self.findE(name)
+        if e.exists() {
+            return e
+        }
+
+        // Set the hidden bit
+        (*self.get(i)).hidden = true
+        return error {}
+    }
+
+    /**
+     * tryMarkDeprecated
+     * Marks name deprecated with a message shown when it is used, the flag is hidden from help
+     * @param name {string} - the long name
+     * @param msg {string} - the message
+     * @return a clean error, or "no flag named '--name'"
+     **/
+    func tryMarkDeprecated(name: string, msg: string) -> error {
+        // The flag, or the error naming it as missing
+        i, e := self.findE(name)
+        if e.exists() {
+            return e
+        }
+
+        // Store the message
+        (*self.get(i)).deprecated = msg
+        return error {}
+    }
+
+    /**
+     * tryBindEnv
+     * Binds name to one environment variable by its exact spelling, a set cannot see the root it ends up under so a binding in a strict tree is reported by novaValidate and refused by novaExecuteE rather than here
+     * @param name {string} - the long name
+     * @param varName {string} - the environment variable, borrowed
+     * @return a clean error, or "no flag named '--name'"
+     **/
+    func tryBindEnv(name: string, varName: string) -> error {
+        // The flag, or the error naming it as missing
+        i, e := self.findE(name)
+        if e.exists() {
+            return e
+        }
+
+        // Store the variable name
+        (*self.get(i)).env = varName
+        return error {}
     }
 
     /**
      * markRequired
-     * Marks name as required, the executor errors when it is not set
+     * Marks name as required, the executor errors when it is not set, aborts when it is not declared
      * @param name {string} - the long name
      * @return nothing
      **/
     func markRequired(name: string) -> void {
-        // The flag
-        f: *Flag = self.require(name)
-
-        // Set the required bit
-        (*f).required = true
+        // Mark it and abort on a refusal
+        e: error = self.tryMarkRequired(name)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
     }
 
     /**
      * markHidden
-     * Hides name from help output
+     * Hides name from help output, aborts when it is not declared
      * @param name {string} - the long name
      * @return nothing
      **/
     func markHidden(name: string) -> void {
-        // The flag
-        f: *Flag = self.require(name)
-
-        // Set the hidden bit
-        (*f).hidden = true
+        // Mark it and abort on a refusal
+        e: error = self.tryMarkHidden(name)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
     }
 
     /**
      * markDeprecated
-     * Marks name deprecated with a message shown when it is used, the flag is hidden from help
+     * Marks name deprecated with a message shown when it is used, the flag is hidden from help, aborts when it is not declared
      * @param name {string} - the long name
      * @param msg {string} - the message
      * @return nothing
      **/
     func markDeprecated(name: string, msg: string) -> void {
-        // The flag
-        f: *Flag = self.require(name)
-
-        // Store the message
-        (*f).deprecated = msg
+        // Mark it and abort on a refusal
+        e: error = self.tryMarkDeprecated(name, msg)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
     }
 
     /**
      * bindEnv
-     * Binds name to one environment variable by its exact spelling, which wins over the name a command's env prefix would give it
+     * Binds name to one environment variable by its exact spelling, which wins over the name a command's env prefix would give it, aborts when it is not declared
      * @param name {string} - the long name
      * @param varName {string} - the environment variable, borrowed
      * @return nothing
      **/
     func bindEnv(name: string, varName: string) -> void {
-        // The flag
-        f: *Flag = self.require(name)
+        // Bind it and abort on a refusal
+        e: error = self.tryBindEnv(name, varName)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+    }
 
-        // Store the variable name
-        (*f).env = varName
+    /**
+     * trySource
+     * Gives where the value of name came from
+     * @param name {string} - the long name
+     * @return the source and a clean error, or SDefault and "no flag named '--name'"
+     **/
+    func trySource(name: string) -> (FlagSource, error) {
+        // The flag, or the error naming it as missing
+        i, e := self.findE(name)
+        if e.exists() {
+            return (FlagSource.SDefault, e)
+        }
+
+        // Return the source
+        return ((*self.get(i)).source, error {})
+    }
+
+    /**
+     * tryGetBool
+     * Gives the value of the bool flag name
+     * @param name {string} - the long name
+     * @return the value and a clean error, or false and "no bool flag named '--name'"
+     **/
+    func tryGetBool(name: string) -> (bool, error) {
+        // The flag checked for kind
+        i, e := self.findKindE(name, FlagKind.KBool, "bool")
+        if e.exists() {
+            return (false, e)
+        }
+
+        // Return the bool value
+        return ((*self.get(i)).valB, error {})
+    }
+
+    /**
+     * tryGetStr
+     * Gives the value of the string or choice flag name
+     * @param name {string} - the long name
+     * @return the value and a clean error, or "" and "no string flag named '--name'"
+     **/
+    func tryGetStr(name: string) -> (string, error) {
+        // The flag checked for kind, a string or a choice
+        i, e := self.findStrLikeE(name)
+        if e.exists() {
+            return ("", e)
+        }
+
+        // Return the string value
+        return ((*self.get(i)).valS, error {})
+    }
+
+    /**
+     * tryGetInt
+     * Gives the value of the int flag name
+     * @param name {string} - the long name
+     * @return the value and a clean error, or 0 and "no int flag named '--name'"
+     **/
+    func tryGetInt(name: string) -> (int64, error) {
+        // The flag checked for kind
+        i, e := self.findKindE(name, FlagKind.KInt, "int")
+        if e.exists() {
+            return (0, e)
+        }
+
+        // Return the int value
+        return ((*self.get(i)).valI, error {})
+    }
+
+    /**
+     * tryGetFloat
+     * Gives the value of the float flag name
+     * @param name {string} - the long name
+     * @return the value and a clean error, or 0.0 and "no float flag named '--name'"
+     **/
+    func tryGetFloat(name: string) -> (float64, error) {
+        // The flag checked for kind
+        i, e := self.findKindE(name, FlagKind.KFloat, "float")
+        if e.exists() {
+            return (0.0, e)
+        }
+
+        // Return the float value
+        return ((*self.get(i)).valF, error {})
+    }
+
+    /**
+     * tryGetStrs
+     * Gives the items of the string slice flag name
+     * @param name {string} - the long name
+     * @return the items, borrowed and never freed by the caller, and a clean error, or an empty list the set owns and "no strings flag named '--name'"
+     **/
+    func tryGetStrs(name: string) -> (*Vector<string>, error) {
+        // The flag checked for kind
+        i, e := self.findKindE(name, FlagKind.KStrs, "strings")
+        if e.exists() {
+            return (self.none, e)
+        }
+
+        // Return the value list
+        return ((*self.get(i)).valV, error {})
+    }
+
+    /**
+     * tryGetCount
+     * Gives how many times the count flag name was named
+     * @param name {string} - the long name
+     * @return the count and a clean error, or 0 and "no count flag named '--name'"
+     **/
+    func tryGetCount(name: string) -> (int64, error) {
+        // The flag checked for kind
+        i, e := self.findKindE(name, FlagKind.KCount, "count")
+        if e.exists() {
+            return (0, e)
+        }
+
+        // Return the count
+        return ((*self.get(i)).valI, error {})
+    }
+
+    /**
+     * tryChanged
+     * Checks if name was set on the command line
+     * @param name {string} - the long name
+     * @return the answer and a clean error, or false and "no flag named '--name'"
+     **/
+    func tryChanged(name: string) -> (bool, error) {
+        // The flag, or the error naming it as missing
+        i, e := self.findE(name)
+        if e.exists() {
+            return (false, e)
+        }
+
+        // Return the changed bit
+        return ((*self.get(i)).changed, error {})
     }
 
     /**
@@ -946,11 +1391,12 @@ impl FlagSet {
      * @return the source, SDefault when nothing set it
      **/
     func source(name: string) -> FlagSource {
-        // The flag
-        f: *Flag = self.require(name)
-
-        // Return the source
-        return (*f).source
+        // The source, aborting on a refusal
+        s, e := self.trySource(name)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+        return s
     }
 
     /**
@@ -960,11 +1406,12 @@ impl FlagSet {
      * @return the value
      **/
     func getBool(name: string) -> bool {
-        // The flag checked for kind
-        f: *Flag = self.requireKind(name, FlagKind.KBool, "bool")
-
-        // Return the bool value
-        return (*f).valB
+        // The value, aborting on a refusal
+        v, e := self.tryGetBool(name)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+        return v
     }
 
     /**
@@ -974,11 +1421,12 @@ impl FlagSet {
      * @return the value
      **/
     func getStr(name: string) -> string {
-        // The flag checked for kind, a string or a choice
-        f: *Flag = self.requireStrLike(name)
-
-        // Return the string value
-        return (*f).valS
+        // The value, aborting on a refusal
+        v, e := self.tryGetStr(name)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+        return v
     }
 
     /**
@@ -988,11 +1436,12 @@ impl FlagSet {
      * @return the value
      **/
     func getInt(name: string) -> int64 {
-        // The flag checked for kind
-        f: *Flag = self.requireKind(name, FlagKind.KInt, "int")
-
-        // Return the int value
-        return (*f).valI
+        // The value, aborting on a refusal
+        v, e := self.tryGetInt(name)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+        return v
     }
 
     /**
@@ -1002,11 +1451,12 @@ impl FlagSet {
      * @return the value
      **/
     func getFloat(name: string) -> float64 {
-        // The flag checked for kind
-        f: *Flag = self.requireKind(name, FlagKind.KFloat, "float")
-
-        // Return the float value
-        return (*f).valF
+        // The value, aborting on a refusal
+        v, e := self.tryGetFloat(name)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+        return v
     }
 
     /**
@@ -1016,11 +1466,13 @@ impl FlagSet {
      * @return the items, borrowed from the flag and never freed by the caller
      **/
     func getStrs(name: string) -> *Vector<string> {
-        // The flag checked for kind
-        f: *Flag = self.requireKind(name, FlagKind.KStrs, "strings")
-
-        // Return the value list
-        return (*f).valV
+        // The items, aborting on a refusal
+        v0, e := self.tryGetStrs(name)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+        v: *Vector<string> = v0
+        return v
     }
 
     /**
@@ -1030,11 +1482,12 @@ impl FlagSet {
      * @return the count
      **/
     func getCount(name: string) -> int64 {
-        // The flag checked for kind
-        f: *Flag = self.requireKind(name, FlagKind.KCount, "count")
-
-        // Return the count
-        return (*f).valI
+        // The count, aborting on a refusal
+        v, e := self.tryGetCount(name)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+        return v
     }
 
     /**
@@ -1044,11 +1497,12 @@ impl FlagSet {
      * @return true when set
      **/
     func changed(name: string) -> bool {
-        // The flag
-        f: *Flag = self.require(name)
-
-        // Return the changed bit
-        return (*f).changed
+        // The answer, aborting on a refusal
+        v, e := self.tryChanged(name)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+        return v
     }
 
     /**
@@ -1167,5 +1621,9 @@ impl FlagSet {
         // Free the vector buffer and the vector
         vec_free(items)
         free(self.items)
+
+        // Free the empty list a failed tryGetStrs hands back
+        vec_free(self.none)
+        free(self.none)
     }
 }

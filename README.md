@@ -17,8 +17,10 @@ A Cobra style command line framework for dusk
 - [Generator](#generator)
 - [Shell completion](#shell-completion)
 - [Docs](#docs)
+- [Using nova in privileged tools](#using-nova-in-privileged-tools)
 - [Tests](#tests)
 - [Status](#status)
+- [Changelog](#changelog)
 
 # About
 
@@ -242,7 +244,7 @@ return code
 
 # Env and config
 
-A flag can take its value from the environment or from a JSON file when the line didn't give one, and the order is always the line, then the environment, then the file, then the default. c.setEnvPrefix("APP") on the root binds every flag under it to APP_NAME, the long name upper cased with dashes turned into underscores, fs.bindEnv("label", "LABEL") binds one flag to one variable outright, and an empty variable counts as unset since dusk can't tell the two apart.
+A flag can take its value from the environment or from a JSON file when the line didn't give one, and the order is always the line, then the environment, then the file, then the default, unless the root is strict, which reads neither, see Using nova in privileged tools. c.setEnvPrefix("APP") on the root binds every flag under it to APP_NAME, the long name upper cased with dashes turned into underscores, fs.bindEnv("label", "LABEL") binds one flag to one variable outright, and an empty variable counts as unset since dusk can't tell the two apart.
 
 ```dusk
 root.setEnvPrefix("NOVA")                 // --port reads NOVA_PORT, --db-host reads NOVA_DB_HOST
@@ -346,13 +348,68 @@ $ ls site/
 myapp.md  myapp_serve.md  myapp_config.md  myapp_config_set.md
 ```
 
+# Using nova in privileged tools
+
+A tool that runs as root takes its argv from someone with less privilege than it has, so nova has three things for that case, error values in place of every abort, a strict mode with no ambient input, and stated bounds on everything argv can make it do. Build the tree with the try forms, which hand back an error where the plain form would print fatal: nova: and abort, check it once with novaValidate before argv is touched, and run it with novaExecuteE. examples/strict/strict.dusk is the whole pattern.
+
+```dusk
+func rootCmd() -> (*Command, error) {
+    c: *Command = cmdNew("tool", "Do the privileged thing")
+    c.setStrict(true)
+    c.setMaxArgs(64)                       // and setMaxArgLen, setMaxFlagValues, setMaxDepth, setMaxHelpBytes
+    lf: *FlagSet = c.localFlags()
+    // firstErr keeps the first of two errors, examples/strict/strict.dusk has it
+    mut e: error = lf.tryAddStr("user", "u", "", "who to act for")
+    e = firstErr(e, lf.tryAddInt("uid", "", 0, "the uid"))
+    e = firstErr(e, c.tryAddCommand(applyCmd()))
+    return (c, e)
+}
+
+func main(argc: int32, argv: string[]) -> int32 {
+    root, be := rootCmd()
+    if be.exists() { printerr(be.message); return 2 }
+    ve: error = novaValidate(root)
+    if ve.exists() { printerr(ve.message); return 2 }
+    code, e := novaExecuteE(root, argv)
+    if e.exists() { return code }
+    return code
+}
+```
+
+The try forms are tryAddBool, tryAddStr, tryAddInt, tryAddFloat, tryAddStrs, tryAddCount, tryAddChoice, tryMarkRequired, tryMarkHidden, tryMarkDeprecated, tryBindEnv, tryGetBool, tryGetStr, tryGetInt, tryGetFloat, tryGetStrs, tryGetCount, tryChanged and trySource on a FlagSet, tryAddCommand, tryAddFlagGroup, tryMarkFlagsRequiredTogether, tryMarkFlagsOneRequired, tryMarkFlagsMutuallyExclusive, tryRegisterFlagCompletionFunc, trySetEnvPrefix, trySetConfigFile and trySetConfigFlag on a Command, cmdTryChild(c, i) for a child index, and tryArg, tryGetBool, tryGetStr, tryGetInt, tryGetFloat, tryGetStrs, tryGetCount, tryChanged, trySource, tryPrintHelp and tryPrintUsage on a Context. A declaration returns error and a getter returns (value, error) the way novaExecuteE returns (int32, error), the value is the zero value when the error is set, tryGetStrs hands back an empty list nova owns, cmdTryChild hands back the parent itself, and a refused declaration leaves the set or the command exactly as it was. Every plain form is now a thin wrapper that calls its try form and aborts with the same message it always printed.
+
+novaValidate(root) walks the whole tree and gives back one error whose message holds every problem on its own line, a child name or alias two children share (addAlias after addCommand can still do that), an empty name or one starting with a dash, a flag name or shorthand the parser could never reach, a choice default outside its choices, a flag group or completion func naming a flag the command doesn't declare, a negative limit, strict or a limit set somewhere other than the root, and a root that was added as a child, which is the only way a tree can loop since every other command can only get one parent. novaValidateProblems(root) gives the same lines as a vector. A command deeper than the depth limit is not a declaration problem, a run that names it gets a usage error.
+
+root.setStrict(true) turns strict on and it only counts on the root. Under strict novaExecuteE runs novaValidate first and refuses to run a tree with any problem in it, exit code 1 and the problems on the err sink, and on top of the checks above a strict tree may not have an env prefix, a config file, a config flag or an env bound flag anywhere in it, nor the docs command since that writes files. trySetEnvPrefix, trySetConfigFile and trySetConfigFlag refuse straight away on a command already marked strict, a child built before it was linked can't see the root so those come out of novaValidate instead. What strict guarantees is this, no environment variable is read by the library, the only env() call is in configApply and it returns before reading anything under a strict root, no file is opened by the library, the only read_file is behind the same gate and docWriteTree refuses a strict root before it touches the disk, everything nova itself prints goes to the root's out and err sinks, help, usage, errors, deprecation warnings, completion output and the version line, and the limits left at 0 take the lower strict defaults. What it doesn't cover is the code you hand it, a handler, a help func, a usage func or a completion func can still do anything, configApplyEnv and configApplyFile called directly are your own call (configApplyFile has the gate too, configApplyEnv sees no root), and the plain aborting forms still write fatal: nova: to stderr, which is why a strict program should use the try forms only. These are every environment read and file open in nova/ and how each is gated.
+
+| site | what | under strict |
+| --- | --- | --- |
+| nova/config.dusk configReadEnv | env() for a bound or prefixed flag | configApply returns before it, novaValidate refuses any binding |
+| nova/config.dusk configApplyFile | read_file of the config file | configApply returns before it, configApplyFile checks the root itself, novaValidate refuses any config file or flag |
+| nova/doc.dusk docWriteTree | file_stat, make_dir, open_file, write_bytes, close_file | docWriteTree refuses a strict root, novaValidate refuses the docs command |
+
+The colour, width and completion paths read nothing, there is no colour, the wrap width is only what setWrapWidth sets, and the completion scripts read the shell's own variables inside the shell, never inside the program.
+
+The bounds are read off the root, setMaxArgs, setMaxArgLen, setMaxFlagValues, setMaxDepth and setMaxHelpBytes set them, 0 means the default and strict lowers the defaults, and going over any of them is an ordinary Error: line with exit code 1, nothing is ever truncated to fit.
+
+| bound | setter | default | strict default |
+| --- | --- | --- | --- |
+| argv entries after the program name | setMaxArgs | 4096 | 1024 |
+| bytes in one argv entry | setMaxArgLen | 65536 | 16384 |
+| values one repeated strs flag collects, and how far a count flag counts by repetition | setMaxFlagValues | 4096 | 1024 |
+| commands on one chain, the root counted | setMaxDepth | 32 | 16 |
+| bytes in one rendered help or usage text | setMaxHelpBytes | 1048576 | 262144 |
+
+The argv count and lengths are checked before a word is scanned, the depth when the scanner would descend into a fourth command under a limit of 3, the values after each one is added, and the help text after it is rendered and before a byte of it is written, a custom help or usage func is not measured. A count set outright with --loud=N is not held to the limit, only the repetition is, so -v can never wrap. Numbers have a grammar of their own now rather than whatever the C library takes, an int or a count is an optional + or - and then one or more ASCII digits and must fit an int64, from -9223372036854775808 to 9223372036854775807, and a float is an optional sign, digits with an optional fraction or a fraction alone, then an optional e or E with an optional sign and at least one digit, and has to stay finite. Leading or trailing whitespace, hex, octal and binary prefixes, underscores, inf, nan and infinity are all refused, a value too big is out of range for a 64 bit integer or float rather than wrapped or turned into infinity, and a float too small to hold rounds to zero. Every loop over argv moves forward on every turn and every scan of a word works on bytes, so a lone -, --, --=, -=x, an empty word, a value flag in the middle of a cluster such as -lnbob, and bytes that are not UTF-8 in an argument or in help text all end in a positional or an ordinary usage error, the goldens named strict-malformed-* show each one.
+
 # Tests
 
-tests/run.sh builds every example and replays every case under tests/cases/, where a case is a directory holding cmd with the app name and its arguments, optionally led by VAR=value assignments for the environment, the exact expected stdout, an optional stderr and an optional code, and failures print a unified diff. It also runs bash -n over every recorded completion script, zsh -n when zsh is around, and tests/complete.sh, which sources the generated bash script and drives it with COMP_WORDS set to prove the candidates come back through the real program. tests/gen.sh is the generator's own end to end test, it packages the working tree into a git repository inside a sandbox, has init require it over file://, then builds and runs the fetched project with dawn run, dawn build and dusk build, checks every refusal and the unwired warning fallback, and covers --vendor after that.
+tests/run.sh builds every example and replays every case under tests/cases/, where a case is a directory holding cmd with the app name and its arguments, optionally led by VAR=value assignments for the environment, the exact expected stdout, an optional stderr and an optional code, and failures print a unified diff. It also runs bash -n over every recorded completion script, zsh -n when zsh is around, tests/complete.sh, which sources the generated bash script and drives it with COMP_WORDS set to prove the candidates come back through the real program, and tests/fuzz.sh under the name fuzz, which replays 3000 argv vectors a fixed seed builds out of commands, flags and hostile tokens against the strict and flags examples and fails on a signal, a run past 5 seconds, an exit code other than 0 or 1 or a fatal: line. tests/gen.sh is the generator's own end to end test, it packages the working tree into a git repository inside a sandbox, has init require it over file://, then builds and runs the fetched project with dawn run, dawn build and dusk build, checks every refusal and the unwired warning fallback, and covers --vendor after that.
 
 ```console
 $ tests/run.sh                    # everything
 $ tests/run.sh todo-config        # only cases whose name contains this
+$ tests/run.sh fuzz               # only the fuzz run
 $ tests/run.sh --update           # record expected files that are missing
 $ tests/gen.sh                    # build nova-cli, then the whole scenario
 $ tests/gen.sh --no-build --keep  # reuse the binary, leave the sandbox behind
@@ -360,6 +417,14 @@ $ tests/gen.sh --no-build --keep  # reuse the binary, leave the sandbox behind
 
 # Status
 
-There's a fair amount that isn't done. The command tree lives for the whole process and novaFreeTree in nova/freetree.dusk frees it at the end of main if you want it gone, a novaExecute call itself gives back every block it took so a long running program can run the tree as often as it likes, it frees every command, their vectors, groups and both flag sets along with the strings a strs or choice flag split for itself, but not the strings you handed in since those are your literals or argv, the library needs dusk 1.14 or newer since it leans on the package manifest as well as @paradigm oop plus procedural, self referencing vectors, function typed struct fields, etc. and dawn has no version ranges, so a reference is one tag, branch or commit and a diamond in the dependency graph is something you pin yourself. init --vendor and init --link still write the pre 1.14 shape for a tree that has to build with no dawn at all, they find the library through NOVA_HOME or by walking up from the running binary. The examples in this repository are the odd ones out, they use symlinks to reach nova because they sit inside the nova-cli package itself and a package can't require itself. Completion covers bash, zsh and fish and only the bash script is exercised by a test since the other two shells aren't on my machine, error messages follow Cobra 1.x but print the help hint instead of a full usage dump, and library misuse such as a duplicate flag, a duplicate command name, a getter for a flag that doesn't exist, etc. aborts with fatal: nova: <msg> on stderr rather than handing you an error to deal with.
+There's a fair amount that isn't done. The command tree lives for the whole process and novaFreeTree in nova/freetree.dusk frees it at the end of main if you want it gone, a novaExecute call itself gives back every block it took so a long running program can run the tree as often as it likes, it frees every command, their vectors, groups and both flag sets along with the strings a strs or choice flag split for itself, but not the strings you handed in since those are your literals or argv, the library needs dusk 1.14 or newer since it leans on the package manifest as well as @paradigm oop plus procedural, self referencing vectors, function typed struct fields, etc. and dawn has no version ranges, so a reference is one tag, branch or commit and a diamond in the dependency graph is something you pin yourself. init --vendor and init --link still write the pre 1.14 shape for a tree that has to build with no dawn at all, they find the library through NOVA_HOME or by walking up from the running binary. The examples in this repository are the odd ones out, they use symlinks to reach nova because they sit inside the nova-cli package itself and a package can't require itself. Completion covers bash, zsh and fish and only the bash script is exercised by a test since the other two shells aren't on my machine, error messages follow Cobra 1.x but print the help hint instead of a full usage dump, and library misuse such as a duplicate flag, a duplicate command name, a getter for a flag that doesn't exist, etc. still aborts with fatal: nova: <msg> on stderr through the plain forms, the try forms hand you the error instead.
 
 It may not be perfect but it's better than nothing.
+
+# Changelog
+
+# Unreleased
+
+Added the try forms listed under Using nova in privileged tools, every one of them returning error or (value, error), with the plain forms kept as thin wrappers that abort with the same messages they always did, so no existing signature changed. Added cmdTryChild, novaValidate and novaValidateProblems in nova/validate.dusk, setStrict, setMaxArgs, setMaxArgLen, setMaxFlagValues, setMaxDepth and setMaxHelpBytes on a Command, novaMaxArgs, novaMaxArgLen, novaMaxFlagValues, novaMaxDepth and novaMaxHelpBytes in nova/limits.dusk, textParseInt, textParseFloat, textIsDecimalFloat and textDigitRun in nova/number.dusk, helpDispatchE, usageDispatchE and helpLimitErr in nova/help.dusk, flagNameShapeErr and the FlagSet lookups findE, findKindE, findStrLikeE and checkNewE, cmdChildIndexErr, flagGroupFreeNames and novaFaultMsg. Added examples/strict and tests/fuzz.sh.
+
+Some behaviour changed. The limits apply to every root, with defaults far above what a normal command line holds, a float flag no longer takes leading whitespace, hex floats, inf or nan, or a value that overflows to infinity, an int or count value outside the int64 range now says out of range for a 64 bit integer where it used to say expected an integer, a flag name that is empty, starts with a dash or holds an "=", and a shorthand that is a dash, an "=" or a digit, are now refused at declaration since the parser could never reach them, setEnvPrefix, setConfigFile and setConfigFlag abort on a command already marked strict, and helpDispatch, usageDispatch, ctx.printHelp and ctx.printUsage write an Error: line instead of a help text over the help limit. Command, FlagSet and ParseState grew fields, which only matters to code that builds one with a struct literal rather than cmdNew, flagsetNew or parseStateNew.

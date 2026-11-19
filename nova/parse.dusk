@@ -1,6 +1,7 @@
 /**
  * nova/parse.dusk
  * The two pass argv scanner novaExecute drives, pass 1 finds the command, pass 2 parses the flags
+ * Every loop here moves its cursor forward on every turn, pass 1 by one or two words and pass 2 by one token plus at most one value token, the cluster walk by one byte or straight to the end, so a lone "-", "--", "--=", "-=x", an empty word, a value flag in the middle of a cluster and bytes that are not UTF-8 all end in a positional or an ordinary usage error
  **/
 @paradigm oop
 @paradigm procedural
@@ -12,10 +13,12 @@
 @import sink
 @import command
 @import context
+@import limits
 
 /**
  * ParseState
  * The scanner state for one novaExecute call, parseFind fills chain and toks, parseAll fills pos and helpRequested
+ * maxDepth and maxValues are the root's limits read once when the state is built, tooDeep records that pass 1 stopped at a word naming a child the depth limit kept it out of
  **/
 export struct ParseState {
     chain: *Vector<*Command>,
@@ -28,6 +31,9 @@ export struct ParseState {
     helpRequested: bool,
     stopFlags: bool,
     skipHidden: bool,
+    maxDepth: int64,
+    maxValues: int64,
+    tooDeep: bool,
 }
 
 // Builds a scanner over either an argv or a word vector, the shared body of the two constructors
@@ -45,6 +51,7 @@ func parseStateMake(rootc: *Command, argv: string[], words: *Vector<string>, use
         chain: chain, pos: pos, argv: argv, words: words, useWords: useWords,
         toks: toks, i: 0,
         helpRequested: false, stopFlags: false, skipHidden: false,
+        maxDepth: novaMaxDepth(rootc), maxValues: novaMaxFlagValues(rootc), tooDeep: false,
     })
 }
 
@@ -279,6 +286,13 @@ export func parseFind(st: *ParseState) -> void {
         if j >= 0 {
             k: *Command = curc.child(j)
             if !((*st).skipHidden && (*k).hidden && (*k).isBuiltin) {
+                // A chain already at the depth limit takes no more commands, which the executor reports
+                if vec_len(chain) >= (*st).maxDepth {
+                    (*st).tooDeep = true
+                    descending = false
+                    vec_push(toks, tok)
+                    continue
+                }
                 vec_push(chain, k)
                 continue
             }
@@ -320,6 +334,71 @@ func parseTakeNext(st: *ParseState) -> (string, bool) {
     // Move the cursor and return the token
     (*st).i = i + 1
     return (vec_get(toks, i), true)
+}
+
+// Builds "flag --<name><middle><limit><tail>" as a fresh heap error message
+func parseLimitErr(name: string, middle: string, limit: int64, tail: string) -> error {
+    // Builder for the message
+    sb: *StringBuilder = alloc(sb_new())
+
+    // Push the parts in order
+    sb_push(sb, "flag --")
+    sb_push(sb, name)
+    sb_push(sb, middle)
+    sb_push_int(sb, limit)
+    sb_push(sb, tail)
+
+    // Copy the builder out and free it
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return error { message: out }
+}
+
+/**
+ * parseSetValue
+ * Sets flag idx of fset from text on the line, then holds a string slice flag to the run's value limit
+ * @param st {*ParseState} - the scanner, whose limit applies
+ * @param fset {*FlagSet} - the set holding the flag
+ * @param idx {int64} - the flag index
+ * @param raw {string} - the text, borrowed
+ * @return a clean error, the invalid argument error, or "flag --x has more than N values"
+ **/
+func parseSetValue(st: *ParseState, fset: *FlagSet, idx: int64, raw: string) -> error {
+    // Parse and store the text
+    e: error = fset.setValue(idx, raw)
+    if e.exists() {
+        return e
+    }
+
+    // A string slice that grew past the limit is refused
+    f: *Flag = fset.get(idx)
+    if flagKindEq((*f).kind, FlagKind.KStrs) && vec_len((*f).valV) > (*st).maxValues {
+        return parseLimitErr((*f).name, " has more than ", (*st).maxValues, " values")
+    }
+    return error {}
+}
+
+/**
+ * parseBump
+ * Adds one to a count flag seen on the line, refused once the count stands at the run's value limit so it can never wrap
+ * @param st {*ParseState} - the scanner, whose limit applies
+ * @param fset {*FlagSet} - the set holding the flag
+ * @param idx {int64} - the flag index
+ * @return a clean error, or "flag --x counts past the limit of N"
+ **/
+func parseBump(st: *ParseState, fset: *FlagSet, idx: int64) -> error {
+    // The flag and its count so far
+    f: *Flag = fset.get(idx)
+
+    // A count already at the limit takes no more
+    if (*f).valI >= (*st).maxValues {
+        return parseLimitErr((*f).name, " counts past the limit of ", (*st).maxValues, "")
+    }
+
+    // Count one more
+    fset.bump(idx)
+    return error {}
 }
 
 /**
@@ -401,7 +480,7 @@ func parseLongNamed(st: *ParseState, name: string, val: string, hadEq: bool) -> 
     // A bool flag is set on, or set from its "=value"
     if flagKindEq((*f).kind, FlagKind.KBool) {
         if hadEq {
-            e: error = fset.setValue(idx, val)
+            e: error = parseSetValue(st, fset, idx, val)
             if e.exists() {
                 return e
             }
@@ -415,12 +494,15 @@ func parseLongNamed(st: *ParseState, name: string, val: string, hadEq: bool) -> 
     // A count flag counts one more, or is set outright from its "=value"
     if flagKindEq((*f).kind, FlagKind.KCount) {
         if hadEq {
-            e3: error = fset.setValue(idx, val)
+            e3: error = parseSetValue(st, fset, idx, val)
             if e3.exists() {
                 return e3
             }
         } else {
-            fset.bump(idx)
+            be: error = parseBump(st, fset, idx)
+            if be.exists() {
+                return be
+            }
         }
         parseWarnDeprecated(st, f)
         return error {}
@@ -437,7 +519,7 @@ func parseLongNamed(st: *ParseState, name: string, val: string, hadEq: bool) -> 
     }
 
     // Set the value on the flag
-    e2: error = fset.setValue(idx, raw)
+    e2: error = parseSetValue(st, fset, idx, raw)
     if e2.exists() {
         return e2
     }
@@ -505,7 +587,7 @@ export func parseShortCluster(st: *ParseState, tok: string) -> error {
             if k + 1 < n && tok[k + 1] == 61 {
                 // The digits after the "="
                 digits: string = substring(tok, k + 2, n)
-                e3: error = fset.setValue(idx, digits)
+                e3: error = parseSetValue(st, fset, idx, digits)
 
                 // Free the copy the flag no longer needs
                 free(digits)
@@ -515,7 +597,10 @@ export func parseShortCluster(st: *ParseState, tok: string) -> error {
                 parseWarnDeprecated(st, f)
                 k = n
             } else {
-                fset.bump(idx)
+                be: error = parseBump(st, fset, idx)
+                if be.exists() {
+                    return be
+                }
                 parseWarnDeprecated(st, f)
                 k = k + 1
             }
@@ -529,7 +614,7 @@ export func parseShortCluster(st: *ParseState, tok: string) -> error {
 
             // The rest of the cluster as the value
             raw: string = substring(tok, cut, n)
-            e: error = fset.setValue(idx, raw)
+            e: error = parseSetValue(st, fset, idx, raw)
 
             // Free the copy the flag no longer needs
             free(raw)
@@ -558,7 +643,7 @@ export func parseShortCluster(st: *ParseState, tok: string) -> error {
         }
 
         // Set the value on the flag
-        e2: error = fset.setValue(idx, nxt)
+        e2: error = parseSetValue(st, fset, idx, nxt)
         free(ch)
         if e2.exists() {
             return e2

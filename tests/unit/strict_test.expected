@@ -1,0 +1,184 @@
+## int grammar
+int "0" -> 0
+int "7" -> 7
+int "+7" -> 7
+int "-7" -> -7
+int "007" -> 7
+int "-0" -> 0
+int "9223372036854775807" -> 9223372036854775807
+int "-9223372036854775808" -> -9223372036854775808
+int "9223372036854775808" -> err: out of range for a 64 bit integer
+int "-9223372036854775809" -> err: out of range for a 64 bit integer
+int "" -> err: expected an integer
+int "+" -> err: expected an integer
+int "-" -> err: expected an integer
+int " 5" -> err: expected an integer
+int "5 " -> err: expected an integer
+int "	5" -> err: expected an integer
+int "0x10" -> err: expected an integer
+int "1e3" -> err: expected an integer
+int "1_000" -> err: expected an integer
+## float grammar
+float "1" -> 1
+float "-2.5" -> -2.5
+float ".5" -> 0.5
+float "5." -> 5
+float "1e3" -> 1000
+float "+2.5E-3" -> 0.0025
+float "1e-400" -> 0
+float "1e308" -> 1e+308
+float "1e309" -> err: out of range for a 64 bit float
+float "-1e309" -> err: out of range for a 64 bit float
+float "" -> err: expected a number
+float "." -> err: expected a number
+float "e3" -> err: expected a number
+float "1e" -> err: expected a number
+float "1e+" -> err: expected a number
+float " 1" -> err: expected a number
+float "1 " -> err: expected a number
+float "inf" -> err: expected a number
+float "nan" -> err: expected a number
+float "infinity" -> err: expected a number
+float "0x1p3" -> err: expected a number
+float "1.2.3" -> err: expected a number
+## flagset try forms
+tryAddBool verbose: ok
+tryAddStr name: ok
+tryAddInt port: ok
+tryAddFloat rate: ok
+tryAddStrs tag: ok
+tryAddCount loud: ok
+tryAddChoice emit: ok
+tryAddBool duplicate name: err: flag '--verbose' already defined
+tryAddStr duplicate shorthand: err: shorthand '-n' already used for flag '--name'
+tryAddInt long shorthand: err: shorthand for flag '--wide' must be one character
+tryAddFloat empty name: err: flag with an empty name
+tryAddStrs dash name: err: flag name '-x' starts with a dash or holds an "="
+tryAddCount eq name: err: flag name 'a=b' starts with a dash or holds an "="
+tryAddBool digit shorthand: err: shorthand '5' for flag '--five' cannot be parsed
+tryAddBool dash shorthand: err: shorthand '-' for flag '--dash' cannot be parsed
+tryAddChoice bad default: err: default for flag '--mode' is not one of its choices
+declared: 7
+tryMarkRequired name: ok
+tryMarkRequired nope: err: no flag named '--nope'
+tryMarkHidden nope: err: no flag named '--nope'
+tryMarkDeprecated nope: err: no flag named '--nope'
+tryBindEnv nope: err: no flag named '--nope'
+tryGetBool verbose = false: ok
+tryGetStr emit = llvm: ok
+tryGetInt port = 8080: ok
+tryGetFloat rate = 1.5: ok
+tryGetStrs tag len = 2: ok
+tryGetCount loud = 0: ok
+tryChanged port = false: ok
+trySource port = default: ok
+tryGetBool name = false: err: no bool flag named '--name'
+tryGetStr port = "": err: no string flag named '--port'
+tryGetInt nope = 0: err: no int flag named '--nope'
+tryGetFloat port = 0: err: no float flag named '--port'
+tryGetStrs name len = 0: err: no strings flag named '--name'
+tryGetCount verbose = 0: err: no count flag named '--verbose'
+tryChanged nope = false: err: no flag named '--nope'
+trySource nope = default: err: no flag named '--nope'
+## command try forms
+tryAddCommand alpha: ok
+tryAddCommand alpha again: err: command 'alpha' already added
+tryAddCommand beta with taken alias: err: alias 'al' already used by another command
+tryAddCommand alpha under other: err: command 'alpha' already has a parent
+tryAddCommand beta under other: ok
+app kids=1 beta has parent=true
+cmdTryChild 0 = alpha: ok
+cmdTryChild 5 = app: err: child index 5 is out of range, the command has 1 children
+cmdTryChild -1 = app: err: child index -1 is out of range, the command has 1 children
+tryRegisterFlagCompletionFunc json: ok
+tryRegisterFlagCompletionFunc json again: err: flag '--json' already has a completion func
+tryRegisterFlagCompletionFunc nope: err: no flag named '--nope' for the completion func
+tryMarkFlagsMutuallyExclusive json,yaml: ok
+tryMarkFlagsOneRequired json,nope: err: no flag named '--nope' for the flag group
+tryMarkFlagsRequiredTogether nope: err: no flag named '--nope' for the flag group
+app groups=1
+trySetEnvPrefix plain: ok
+trySetEnvPrefix clear: ok
+trySetEnvPrefix strict: err: env prefix "APP" is not allowed under strict mode
+trySetConfigFile strict: err: config file "app.json" is not allowed under strict mode
+trySetConfigFlag strict: err: config flag "--config" is not allowed under strict mode
+trySetEnvPrefix strict clear: ok
+## limits
+plain: args=4096 arglen=65536 values=4096 depth=32 help=1048576
+strict: args=1024 arglen=16384 values=1024 depth=16 help=262144
+set: args=5 arglen=6 values=7 depth=8 help=9
+## novaValidate
+sound tree: ok
+bad tree: err: 'one' names two children of 'bad'
+a limit on 'bad' is negative
+flag '--name' of 'bad one' is bound to an environment variable, which is not allowed under strict mode
+env prefix on 'bad one' is not allowed under strict mode
+config file on 'bad one' is not allowed under strict mode
+config flag on 'bad one' is not allowed under strict mode
+'bad two' sets strict but is not the root, only the root's switch counts
+'bad two' sets a limit but is not the root, only the root's limits count
+name of 'bad' is empty
+alias '-t' of 'bad three' starts with a dash
+command 'bad docs' writes files, which is not allowed under strict mode
+novaExecuteE bad one -> 1 err=true out bytes=0 err bytes=632
+bad tree not strict: err: 'one' names two children of 'bad'
+a limit on 'bad' is negative
+'bad two' sets strict but is not the root, only the root's switch counts
+'bad two' sets a limit but is not the root, only the root's limits count
+name of 'bad' is empty
+alias '-t' of 'bad three' starts with a dash
+kid tryAddCommand loop: ok
+looped tree: err: root 'loop' was added as a child of another command, its children are not checked
+novaExecuteE looped -> 0 err=false
+## context try forms
+tryArg 0 = first: ok
+tryArg 9 = "": err: positional index 9 is out of range, the command got 1
+tryGetBool verbose = true: ok
+tryGetStr name = bob: ok
+tryGetInt port = 1: ok
+tryGetFloat rate = 0.5: ok
+tryGetStrs tag len = 2: ok
+tryGetCount loud = 2: ok
+tryChanged name = true: ok
+trySource port = default: ok
+tryGetStr nope = "": err: no flag named '--nope'
+tryGetBool name = false: err: no bool flag named '--name'
+tryGetStrs nope len = 0: err: no flag named '--nope'
+tryChanged nope = false: err: no flag named '--nope'
+tryPrintHelp: err: help text is 293 bytes, the limit is 10
+tryPrintUsage: err: help text is 288 bytes, the limit is 10
+novaExecuteE -> 0 err=false out bytes=0 err bytes=0
+app run --help -> 1 help text is 293 bytes, the limit is 10
+## argument length defaults
+plain 65536 -> 0: ok
+plain 65537 -> 1: err: argument 1 is 65537 bytes, the limit is 65536
+strict 16384 -> 0: ok
+strict 16385 -> 1: err: argument 1 is 16385 bytes, the limit is 16384
+## strict gate in front of configApply
+strict configApply: ok
+strict: name=world (default) port=0 (default)
+plain configApply: ok
+plain: name=fromenv (env) port=1 (config)
+## help text with bytes that are not UTF-8
+app --help -> 0, 163 bytes: ok
+one ÿ twoÃ
+three €four
+five six
+seven
+
+Usage:
+  app [flags]
+
+Flags:
+  -h, --help          help for app
+  -n, --name string   one ÿ twoÃ three €four five six seven
+## per call leak
+clean run: 0
+too many args: 0
+arg too long: 0
+too deep: 0
+too many values: 0
+count past limit: 0
+help over limit: 0
+bad int: 0
+refused tree: 0

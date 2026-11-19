@@ -1,0 +1,2 @@
+Error: invalid argument "0x1p3" for "--rate" flag: expected a number
+Run 'strict show --help' for usage.

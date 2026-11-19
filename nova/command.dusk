@@ -1,7 +1,8 @@
 /**
  * nova/command.dusk
  * The Command tree, a Command carries its use line, help text, local and persistent flags, children, hooks, flag groups, its out and err sinks and the positional arg validator, novaExecute walks the tree argv describes and dispatches to the handlers
- * Commands are heap values built by cmdNew and linked with addCommand, the tree lives until novaFreeTree in freetree.dusk frees it, usually at the end of main, a duplicate child name aborts with "fatal: nova: ..." on stderr
+ * Commands are heap values built by cmdNew and linked with addCommand, the tree lives until novaFreeTree in freetree.dusk frees it, usually at the end of main, a duplicate child name is an error value from tryAddCommand and aborts with "fatal: nova: ..." on stderr from addCommand
+ * The strict switch and the five limits are read off the root only, see limits.dusk for how a limit left at 0 resolves and validate.dusk for the checks novaValidate runs over a whole tree
  **/
 @paradigm oop
 @paradigm procedural
@@ -28,6 +29,7 @@ export struct FlagCompFunc {
  * Command
  * One node of the CLI tree, every string is borrowed from a caller literal or argv, a command with no handler holds cmdNoop and the matching has flag is false, the E hooks and the help and usage funcs are held the same way and the two sinks start as Inherit so a command writes wherever its parent does
  * Three strings are the exception and are owned by the command itself, the name cmdNew cuts out of the use line, the path the executor rebuilds on every call for every node below the root, and the message of the last error nova itself reported, which the error novaExecuteE hands back points at until the next call or novaFreeTree
+ * strict and the max fields only mean something on the root, a max field at 0 takes the default limits.dusk gives, and opensFiles marks a command whose handler writes files, which a strict tree refuses
  **/
 export struct Command {
     use: string,
@@ -90,6 +92,13 @@ export struct Command {
     disableCompletionCmd: bool,
     disableFlagParsing: bool,
     isBuiltin: bool,
+    strict: bool,
+    maxArgs: int64,
+    maxArgLen: int64,
+    maxValues: int64,
+    maxDepth: int64,
+    maxHelpBytes: int64,
+    opensFiles: bool,
 }
 
 /**
@@ -205,6 +214,9 @@ export func cmdNew(use: string, short: string) -> *Command {
         silenceUsage: false, silenceErrors: false,
         disableHelpCmd: false, disableCompletionCmd: false,
         disableFlagParsing: false, isBuiltin: false,
+        strict: false,
+        maxArgs: 0, maxArgLen: 0, maxValues: 0, maxDepth: 0, maxHelpBytes: 0,
+        opensFiles: false,
     })
 }
 
@@ -439,6 +451,54 @@ export func cmdResolveConfigFlag(chain: *Vector<*Command>) -> string {
     return cmdResolveString(chain, 2)
 }
 
+/**
+ * cmdChildIndexErr
+ * Checks i is a valid index into a child vector
+ * @param kids {*Vector<*Command>} - the children, borrowed
+ * @param i {int64} - the index
+ * @return a clean error, or "child index <i> is out of range, the command has <n> children"
+ **/
+export func cmdChildIndexErr(kids: *Vector<*Command>, i: int64) -> error {
+    // An index inside the vector is fine
+    n: int64 = vec_len(kids)
+    if i >= 0 && i < n {
+        return error {}
+    }
+
+    // Anything else names the index and the count
+    sb: *StringBuilder = alloc(sb_new())
+    sb_push(sb, "child index ")
+    sb_push_int(sb, i)
+    sb_push(sb, " is out of range, the command has ")
+    sb_push_int(sb, n)
+    sb_push(sb, " children")
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return error { message: out }
+}
+
+/**
+ * cmdTryChild
+ * Gives the child of c at index i, the error returning form of c.child(i)
+ * @param c {*Command} - the parent command, borrowed
+ * @param i {int64} - the index
+ * @return the child and a clean error, or c itself and the out of range error, never a pointer to read as the child
+ **/
+export func cmdTryChild(c: *Command, i: int64) -> (*Command, error) {
+    // The child vector
+    kids: *Vector<*Command> = (*c).kids
+
+    // An index outside the children hands the parent back with the error
+    e: error = cmdChildIndexErr(kids, i)
+    if e.exists() {
+        return (c, e)
+    }
+
+    // Return the child at i
+    return (vec_get(kids, i), error {})
+}
+
 impl Command {
     /**
      * setLong
@@ -547,32 +607,48 @@ impl Command {
     }
 
     /**
-     * registerFlagCompletionFunc
+     * tryRegisterFlagCompletionFunc
      * Sets the func completion asks for the values of one flag, the name must be declared on this command's local or persistent set and may be registered only once
      * @param name {string} - the long name without dashes
      * @param f {(*Context, string) -> (*Vector<string>, int64)} - the func, given a context naming this command and the value text so far, handing back the candidates and a directive
-     * @return nothing
+     * @return a clean error, or the reason the func was refused, the command is left alone then
      **/
-    func registerFlagCompletionFunc(name: string, f: (*Context, string) -> (*Vector<string>, int64)) -> void {
+    func tryRegisterFlagCompletionFunc(name: string, f: (*Context, string) -> (*Vector<string>, int64)) -> error {
         // The two sets a name may be declared in
         lf: *FlagSet = self.flags
         pf: *FlagSet = self.pflags
 
-        // A name neither set declares is a fault
+        // A name neither set declares is refused
         if !lf.has(name) && !pf.has(name) {
-            novaFault("no flag named '--", name, "' for the completion func")
+            return error { message: textCat3("no flag named '--", name, "' for the completion func") }
         }
 
         // The registry of this command
         comps: *Vector<*FlagCompFunc> = self.compFuncs
 
-        // A second func for the same flag is a fault
+        // A second func for the same flag is refused
         if cmdFindFlagComp(comps, name) >= 0 {
-            novaFault("flag '--", name, "' already has a completion func")
+            return error { message: textCat3("flag '--", name, "' already has a completion func") }
         }
 
         // Push the entry
         vec_push(comps, alloc(FlagCompFunc { name: name, f: f }))
+        return error {}
+    }
+
+    /**
+     * registerFlagCompletionFunc
+     * Sets the func completion asks for the values of one flag, aborts where tryRegisterFlagCompletionFunc would hand back an error
+     * @param name {string} - the long name without dashes
+     * @param f {(*Context, string) -> (*Vector<string>, int64)} - the func, given a context naming this command and the value text so far, handing back the candidates and a directive
+     * @return nothing
+     **/
+    func registerFlagCompletionFunc(name: string, f: (*Context, string) -> (*Vector<string>, int64)) -> void {
+        // Register it and abort on a refusal
+        e: error = self.tryRegisterFlagCompletionFunc(name, f)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
     }
 
     /**
@@ -783,36 +859,162 @@ impl Command {
     }
 
     /**
+     * trySetEnvPrefix
+     * Sets the prefix the environment variables of this command and its descendants are named after, so --log-level reads PREFIX_LOG_LEVEL, refused on a command already marked strict, a strict root deeper up is caught by novaValidate instead
+     * @param s {string} - the prefix without its trailing underscore, "" turning the naming off
+     * @return a clean error, or the strict refusal
+     **/
+    func trySetEnvPrefix(s: string) -> error {
+        // Turning binding on under strict is refused
+        if self.strict && s != "" {
+            return error { message: textCat3("env prefix \"", s, "\" is not allowed under strict mode") }
+        }
+
+        // Store the prefix
+        self.envPrefix = s
+        return error {}
+    }
+
+    /**
+     * trySetConfigFile
+     * Sets the config file this command and its descendants read when no flag names one, a file that is not there being no error, refused on a command already marked strict
+     * @param path {string} - the path, "" for no default file
+     * @return a clean error, or the strict refusal
+     **/
+    func trySetConfigFile(path: string) -> error {
+        // Turning binding on under strict is refused
+        if self.strict && path != "" {
+            return error { message: textCat3("config file \"", path, "\" is not allowed under strict mode") }
+        }
+
+        // Store the path
+        self.configFile = path
+        return error {}
+    }
+
+    /**
+     * trySetConfigFlag
+     * Names the string flag whose value, once the line sets it, names the config file to read instead of the default one, refused on a command already marked strict
+     * @param name {string} - the long name of the flag, "" for no such flag
+     * @return a clean error, or the strict refusal
+     **/
+    func trySetConfigFlag(name: string) -> error {
+        // Turning binding on under strict is refused
+        if self.strict && name != "" {
+            return error { message: textCat3("config flag \"--", name, "\" is not allowed under strict mode") }
+        }
+
+        // Store the flag name
+        self.configFlag = name
+        return error {}
+    }
+
+    /**
      * setEnvPrefix
-     * Sets the prefix the environment variables of this command and its descendants are named after, so --log-level reads PREFIX_LOG_LEVEL
+     * Sets the prefix the environment variables of this command and its descendants are named after, aborts where trySetEnvPrefix would hand back an error
      * @param s {string} - the prefix without its trailing underscore, "" turning the naming off
      * @return nothing
      **/
     func setEnvPrefix(s: string) -> void {
-        // Store the prefix
-        self.envPrefix = s
+        // Store it and abort on a refusal
+        e: error = self.trySetEnvPrefix(s)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
     }
 
     /**
      * setConfigFile
-     * Sets the config file this command and its descendants read when no flag names one, a file that is not there being no error
+     * Sets the config file this command and its descendants read when no flag names one, aborts where trySetConfigFile would hand back an error
      * @param path {string} - the path, "" for no default file
      * @return nothing
      **/
     func setConfigFile(path: string) -> void {
-        // Store the path
-        self.configFile = path
+        // Store it and abort on a refusal
+        e: error = self.trySetConfigFile(path)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
     }
 
     /**
      * setConfigFlag
-     * Names the string flag whose value, once the line sets it, names the config file to read instead of the default one
+     * Names the string flag whose value names the config file to read instead of the default one, aborts where trySetConfigFlag would hand back an error
      * @param name {string} - the long name of the flag, "" for no such flag
      * @return nothing
      **/
     func setConfigFlag(name: string) -> void {
-        // Store the flag name
-        self.configFlag = name
+        // Store it and abort on a refusal
+        e: error = self.trySetConfigFlag(name)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+    }
+
+    /**
+     * setStrict
+     * Turns strict mode on or off for the tree under this command, which has to be the root, under strict no environment variable is read, no file is opened, binding either one is a declaration error novaExecuteE refuses to run with, and the limits left at 0 take the lower strict defaults
+     * @param b {bool} - true for strict
+     * @return nothing
+     **/
+    func setStrict(b: bool) -> void {
+        // Store the bit
+        self.strict = b
+    }
+
+    /**
+     * setMaxArgs
+     * Sets how many argv entries after the program name a run accepts, read off the root, 0 for the default
+     * @param n {int64} - the limit
+     * @return nothing
+     **/
+    func setMaxArgs(n: int64) -> void {
+        // Store the limit
+        self.maxArgs = n
+    }
+
+    /**
+     * setMaxArgLen
+     * Sets how many bytes one argv entry may hold, read off the root, 0 for the default
+     * @param n {int64} - the limit
+     * @return nothing
+     **/
+    func setMaxArgLen(n: int64) -> void {
+        // Store the limit
+        self.maxArgLen = n
+    }
+
+    /**
+     * setMaxFlagValues
+     * Sets how many values a repeated string slice flag may collect and how far a repeated count flag may count, read off the root, 0 for the default
+     * @param n {int64} - the limit
+     * @return nothing
+     **/
+    func setMaxFlagValues(n: int64) -> void {
+        // Store the limit
+        self.maxValues = n
+    }
+
+    /**
+     * setMaxDepth
+     * Sets how many commands deep a run may descend, the root counting as one, read off the root, 0 for the default
+     * @param n {int64} - the limit
+     * @return nothing
+     **/
+    func setMaxDepth(n: int64) -> void {
+        // Store the limit
+        self.maxDepth = n
+    }
+
+    /**
+     * setMaxHelpBytes
+     * Sets how many bytes one help or usage text nova renders may hold, read off the root, 0 for the default
+     * @param n {int64} - the limit
+     * @return nothing
+     **/
+    func setMaxHelpBytes(n: int64) -> void {
+        // Store the limit
+        self.maxHelpBytes = n
     }
 
     /**
@@ -891,13 +1093,13 @@ impl Command {
     }
 
     /**
-     * addFlagGroup
+     * tryAddFlagGroup
      * Adds a flag group of one rule, every name must be declared on this command's local or persistent set
      * @param kind {GroupKind} - the rule the group carries
      * @param names {string} - the long names without dashes, comma separated
-     * @return nothing
+     * @return a clean error, or "no flag named '--x' for the flag group" for the first name nothing declares, the command is left alone then
      **/
-    func addFlagGroup(kind: GroupKind, names: string) -> void {
+    func tryAddFlagGroup(kind: GroupKind, names: string) -> error {
         // The group with its names split off the list
         g: *FlagGroup = flagGroupNew(kind, names)
 
@@ -914,23 +1116,72 @@ impl Command {
             // The current name
             n: string = vec_get(gnames, i)
 
-            // A name neither set declares is a fault
+            // A name neither set declares is refused and the group thrown away
             if !lf.has(n) && !pf.has(n) {
-                novaFault("no flag named '--", n, "' for the flag group")
+                msg: string = textCat3("no flag named '--", n, "' for the flag group")
+                flagGroupFreeNames(g)
+                free(g)
+                return error { message: msg }
             }
             i = i + 1
         }
 
-        // The group vector
-        groups: *Vector<*FlagGroup> = self.groups
-
         // Push the group
-        vec_push(groups, g)
+        vec_push(self.groups, g)
+        return error {}
+    }
+
+    /**
+     * addFlagGroup
+     * Adds a flag group of one rule, aborts where tryAddFlagGroup would hand back an error
+     * @param kind {GroupKind} - the rule the group carries
+     * @param names {string} - the long names without dashes, comma separated
+     * @return nothing
+     **/
+    func addFlagGroup(kind: GroupKind, names: string) -> void {
+        // Add it and abort on a refusal
+        e: error = self.tryAddFlagGroup(kind, names)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+    }
+
+    /**
+     * tryMarkFlagsRequiredTogether
+     * Declares that the listed flags are set together or not at all
+     * @param names {string} - the long names without dashes, comma separated
+     * @return a clean error, or the name nothing declares
+     **/
+    func tryMarkFlagsRequiredTogether(names: string) -> error {
+        // Add the group under the together rule
+        return self.tryAddFlagGroup(GroupKind.GTogether, names)
+    }
+
+    /**
+     * tryMarkFlagsOneRequired
+     * Declares that at least one of the listed flags is set
+     * @param names {string} - the long names without dashes, comma separated
+     * @return a clean error, or the name nothing declares
+     **/
+    func tryMarkFlagsOneRequired(names: string) -> error {
+        // Add the group under the one required rule
+        return self.tryAddFlagGroup(GroupKind.GOneRequired, names)
+    }
+
+    /**
+     * tryMarkFlagsMutuallyExclusive
+     * Declares that no two of the listed flags are set on the same line
+     * @param names {string} - the long names without dashes, comma separated
+     * @return a clean error, or the name nothing declares
+     **/
+    func tryMarkFlagsMutuallyExclusive(names: string) -> error {
+        // Add the group under the exclusive rule
+        return self.tryAddFlagGroup(GroupKind.GExclusive, names)
     }
 
     /**
      * markFlagsRequiredTogether
-     * Declares that the listed flags are set together or not at all
+     * Declares that the listed flags are set together or not at all, aborts on a name nothing declares
      * @param names {string} - the long names without dashes, comma separated
      * @return nothing
      **/
@@ -941,7 +1192,7 @@ impl Command {
 
     /**
      * markFlagsOneRequired
-     * Declares that at least one of the listed flags is set
+     * Declares that at least one of the listed flags is set, aborts on a name nothing declares
      * @param names {string} - the long names without dashes, comma separated
      * @return nothing
      **/
@@ -952,7 +1203,7 @@ impl Command {
 
     /**
      * markFlagsMutuallyExclusive
-     * Declares that no two of the listed flags are set on the same line
+     * Declares that no two of the listed flags are set on the same line, aborts on a name nothing declares
      * @param names {string} - the long names without dashes, comma separated
      * @return nothing
      **/
@@ -976,13 +1227,19 @@ impl Command {
 
     /**
      * child
-     * Gives the child at index i, aborts when out of range
+     * Gives the child at index i, aborts when out of range, cmdTryChild is the form that hands back an error instead
      * @param i {int64} - the index
      * @return the child
      **/
     func child(i: int64) -> *Command {
         // The child vector
         kids: *Vector<*Command> = self.kids
+
+        // An index outside the children aborts with the message cmdTryChild hands back
+        e: error = cmdChildIndexErr(kids, i)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
 
         // Return the child at i
         return vec_get(kids, i)
@@ -1013,22 +1270,21 @@ impl Command {
     }
 
     /**
-     * addCommand
-     * Adds a child, aborts when the child's name or an alias is already taken by an existing child
+     * tryAddCommand
+     * Adds a child, refused when the child's name or an alias is already taken by an existing child or the child already has a parent, every check runs before anything changes so a refusal leaves both commands as they were
      * @param child {*Command} - the child to add
-     * @return nothing
+     * @return a clean error, or the reason the child was refused
      **/
-    func addCommand(child: *Command) -> void {
-        // A taken name is a fault
+    func tryAddCommand(child: *Command) -> error {
+        // A taken name is refused
         if self.findChild((*child).name) >= 0 {
-            novaFault("command '", (*child).name, "' already added")
+            return error { message: textCat3("command '", (*child).name, "' already added") }
         }
 
-        // A child under two parents would be freed twice, so that is a fault too
+        // A child under two parents would be freed twice, so that is refused too
         if (*child).hasParent {
-            novaFault("command '", (*child).name, "' already has a parent")
+            return error { message: textCat3("command '", (*child).name, "' already has a parent") }
         }
-        (*child).hasParent = true
 
         // The child's alias vector
         aliases: *Vector<string> = (*child).aliases
@@ -1039,18 +1295,31 @@ impl Command {
             // The current alias
             a: string = vec_get(aliases, i)
 
-            // A taken alias is a fault
+            // A taken alias is refused
             if self.findChild(a) >= 0 {
-                novaFault("alias '", a, "' already used by another command")
+                return error { message: textCat3("alias '", a, "' already used by another command") }
             }
             i = i + 1
         }
 
-        // The child vector
-        kids: *Vector<*Command> = self.kids
+        // Link the child and push it
+        (*child).hasParent = true
+        vec_push(self.kids, child)
+        return error {}
+    }
 
-        // Push the child
-        vec_push(kids, child)
+    /**
+     * addCommand
+     * Adds a child, aborts where tryAddCommand would hand back an error
+     * @param child {*Command} - the child to add
+     * @return nothing
+     **/
+    func addCommand(child: *Command) -> void {
+        // Add it and abort on a refusal
+        e: error = self.tryAddCommand(child)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
     }
 
     /**

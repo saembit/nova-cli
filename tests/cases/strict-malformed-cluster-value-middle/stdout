@@ -1,0 +1,7 @@
+name=bob (flag)
+port=8080 (default)
+rate=0.5 (default)
+tags=[]
+loud=1
+mode=fast
+args=[]

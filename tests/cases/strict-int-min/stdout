@@ -1,0 +1,7 @@
+name=world (default)
+port=-9223372036854775808 (flag)
+rate=0.5 (default)
+tags=[]
+loud=0
+mode=fast
+args=[]

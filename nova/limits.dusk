@@ -1,0 +1,85 @@
+/**
+ * nova/limits.dusk
+ * The five bounds a run is held to and the defaults they take, every limit is read off the root, a value above 0 set with setMaxArgs, setMaxArgLen, setMaxFlagValues, setMaxDepth or setMaxHelpBytes wins, and a limit left at 0 takes the default below, the lower strict default when the root is strict
+ * Going over a limit is an ordinary usage error with exit code 1, nothing is ever truncated to fit
+ *
+ *   bound                                    default    strict default
+ *   argv entries after the program name      4096       1024
+ *   bytes in one argv entry                  65536      16384
+ *   values one repeated flag collects        4096       1024
+ *   commands on one chain, the root counted  32         16
+ *   bytes in one rendered help or usage      1048576    262144
+ **/
+@paradigm oop
+@paradigm procedural
+
+@import command
+
+// Picks the setting when it is above 0, else the strict or the normal default by the root's switch
+func limitPick(rootc: *Command, set: int64, normal: int64, strictDefault: int64) -> int64 {
+    // An explicit setting wins
+    if set > 0 {
+        return set
+    }
+
+    // Otherwise the default the root's mode asks for
+    if (*rootc).strict {
+        return strictDefault
+    }
+    return normal
+}
+
+/**
+ * novaMaxArgs
+ * Gives how many argv entries after the program name a run of this root accepts
+ * @param rootc {*Command} - the root command
+ * @return the limit
+ **/
+export func novaMaxArgs(rootc: *Command) -> int64 {
+    // The setting or the default
+    return limitPick(rootc, (*rootc).maxArgs, 4096, 1024)
+}
+
+/**
+ * novaMaxArgLen
+ * Gives how many bytes one argv entry may hold in a run of this root
+ * @param rootc {*Command} - the root command
+ * @return the limit
+ **/
+export func novaMaxArgLen(rootc: *Command) -> int64 {
+    // The setting or the default
+    return limitPick(rootc, (*rootc).maxArgLen, 65536, 16384)
+}
+
+/**
+ * novaMaxFlagValues
+ * Gives how many values one repeated string slice flag may collect, and how far one count flag may count by repetition, in a run of this root
+ * @param rootc {*Command} - the root command
+ * @return the limit
+ **/
+export func novaMaxFlagValues(rootc: *Command) -> int64 {
+    // The setting or the default
+    return limitPick(rootc, (*rootc).maxValues, 4096, 1024)
+}
+
+/**
+ * novaMaxDepth
+ * Gives how many commands one chain of this root may hold, the root itself counted
+ * @param rootc {*Command} - the root command
+ * @return the limit
+ **/
+export func novaMaxDepth(rootc: *Command) -> int64 {
+    // The setting or the default
+    return limitPick(rootc, (*rootc).maxDepth, 32, 16)
+}
+
+/**
+ * novaMaxHelpBytes
+ * Gives how many bytes one help or usage text nova renders for this root may hold
+ * @param rootc {*Command} - the root command
+ * @return the limit
+ **/
+export func novaMaxHelpBytes(rootc: *Command) -> int64 {
+    // The setting or the default
+    return limitPick(rootc, (*rootc).maxHelpBytes, 1048576, 262144)
+}

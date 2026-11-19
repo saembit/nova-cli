@@ -1038,13 +1038,19 @@ export func completionFishScript(app: string, noDesc: bool) -> string {
 
 // The handler of the builtin completion command, writes the script for the named shell to the out sink
 func completionRun(ctx: *Context) -> int32 {
-    // The shell asked for and the app name
-    shell: string = ctx.arg(0)
+    // The shell asked for, which the exact args rule already made sure of, and the app name
+    shell, se := ctx.tryArg(0)
+    if se.exists() {
+        return ctx.fail(se.message)
+    }
     rootc: *Command = (*ctx).root
     app: string = (*rootc).name
 
-    // Whether the script asks for candidates without descriptions
-    noDesc: bool = ctx.getBool("no-descriptions")
+    // Whether the script asks for candidates without descriptions, the flag this command declares itself
+    noDesc, ne := ctx.tryGetBool("no-descriptions")
+    if ne.exists() {
+        return ctx.fail(ne.message)
+    }
 
     // The bash script, which always asks for names alone since bash shows nothing else
     if shell == "bash" {

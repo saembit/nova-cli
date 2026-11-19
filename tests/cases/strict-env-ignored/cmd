@@ -1,0 +1,1 @@
+STRICT_NAME=fromenv STRICT_PORT=1 NOVA_NAME=fromenv NAME=fromenv PORT=1 CONFIG=examples/strict/strict.json strict show

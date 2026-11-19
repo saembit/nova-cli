@@ -1,7 +1,7 @@
 /**
  * nova/context.dusk
  * What a handler receives, a Context names the command that runs, the root, the chain of commands from the root down to it, the positional args left after flag parsing and the raw argv
- * Flag getters resolve a name against the command's local flags, then its persistent flags, then each ancestor's persistent flags nearest first, asking for a flag no command on the chain declares aborts with "fatal: nova: ..."
+ * Flag getters resolve a name against the command's local flags, then its persistent flags, then each ancestor's persistent flags nearest first, asking for a flag no command on the chain declares is an error value from the try forms (tryGetStr, tryArg, ...) and aborts with "fatal: nova: ..." from the plain forms built on them
  * changed() answers whether the command line set a flag while source() answers where its value came from at all, the line, the environment, a config file or the declaration
  **/
 @paradigm oop
@@ -141,23 +141,49 @@ export func ctxLookup(ctx: *Context, name: string) -> (*FlagSet, int64, bool) {
 }
 
 /**
- * ctxRequire
- * Gives the set holding name on a chain, aborts with a fatal message when no command on it declares the flag
+ * ctxRequireE
+ * Gives the set holding name on a chain, or the error naming it as missing
  * @param chain {*Vector<*Command>} - the commands root..cmd, borrowed
  * @param name {string} - the long name without dashes
- * @return the set
+ * @return the set and a clean error, or the leaf's own set and "no flag named '--name'"
  **/
-func ctxRequire(chain: *Vector<*Command>, name: string) -> *FlagSet {
+func ctxRequireE(chain: *Vector<*Command>, name: string) -> (*FlagSet, error) {
     // Walk the chain
     fset, i, found := ctxLookupChain(chain, name)
 
-    // A missing flag is a fault
+    // A missing flag is the error
     if !found || i < 0 {
-        novaFault("no flag named '--", name, "'")
+        return (fset, error { message: textCat3("no flag named '--", name, "'") })
     }
 
     // Return the set
-    return fset
+    return (fset, error {})
+}
+
+/**
+ * ctxArgIndexErr
+ * Checks i is a valid index into the positionals
+ * @param args {*Vector<string>} - the positionals, borrowed
+ * @param i {int64} - the index
+ * @return a clean error, or "positional index <i> is out of range, the command got <n>"
+ **/
+func ctxArgIndexErr(args: *Vector<string>, i: int64) -> error {
+    // An index inside the vector is fine
+    n: int64 = vec_len(args)
+    if i >= 0 && i < n {
+        return error {}
+    }
+
+    // Anything else names the index and the count
+    sb: *StringBuilder = alloc(sb_new())
+    sb_push(sb, "positional index ")
+    sb_push_int(sb, i)
+    sb_push(sb, " is out of range, the command got ")
+    sb_push_int(sb, n)
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return error { message: out }
 }
 
 impl Context {
@@ -175,153 +201,295 @@ impl Context {
     }
 
     /**
+     * tryArg
+     * Gives the positional arg at index i
+     * @param i {int64} - the index
+     * @return the arg and a clean error, or "" and the out of range error
+     **/
+    func tryArg(i: int64) -> (string, error) {
+        // The arg vector
+        a: *Vector<string> = self.args
+
+        // An index outside the positionals is the error
+        e: error = ctxArgIndexErr(a, i)
+        if e.exists() {
+            return ("", e)
+        }
+
+        // Return the arg at i
+        return (vec_get(a, i), error {})
+    }
+
+    /**
+     * tryGetBool
+     * Gives the value of the bool flag name as resolved along the chain
+     * @param name {string} - the long name
+     * @return the value and a clean error, or false and the error naming the flag
+     **/
+    func tryGetBool(name: string) -> (bool, error) {
+        // The set that holds the flag
+        fset, e := ctxRequireE(self.chain, name)
+        if e.exists() {
+            return (false, e)
+        }
+
+        // Ask the set, which checks the kind
+        return fset.tryGetBool(name)
+    }
+
+    /**
+     * tryGetStr
+     * Gives the value of the string or choice flag name as resolved along the chain
+     * @param name {string} - the long name
+     * @return the value and a clean error, or "" and the error naming the flag
+     **/
+    func tryGetStr(name: string) -> (string, error) {
+        // The set that holds the flag
+        fset, e := ctxRequireE(self.chain, name)
+        if e.exists() {
+            return ("", e)
+        }
+
+        // Ask the set, which checks the kind
+        return fset.tryGetStr(name)
+    }
+
+    /**
+     * tryGetInt
+     * Gives the value of the int flag name as resolved along the chain
+     * @param name {string} - the long name
+     * @return the value and a clean error, or 0 and the error naming the flag
+     **/
+    func tryGetInt(name: string) -> (int64, error) {
+        // The set that holds the flag
+        fset, e := ctxRequireE(self.chain, name)
+        if e.exists() {
+            return (0, e)
+        }
+
+        // Ask the set, which checks the kind
+        return fset.tryGetInt(name)
+    }
+
+    /**
+     * tryGetFloat
+     * Gives the value of the float flag name as resolved along the chain
+     * @param name {string} - the long name
+     * @return the value and a clean error, or 0.0 and the error naming the flag
+     **/
+    func tryGetFloat(name: string) -> (float64, error) {
+        // The set that holds the flag
+        fset, e := ctxRequireE(self.chain, name)
+        if e.exists() {
+            return (0.0, e)
+        }
+
+        // Ask the set, which checks the kind
+        return fset.tryGetFloat(name)
+    }
+
+    /**
+     * tryGetStrs
+     * Gives the items of the string slice flag name as resolved along the chain
+     * @param name {string} - the long name
+     * @return the items, borrowed and never freed by the caller, and a clean error, or an empty list nova owns and the error naming the flag
+     **/
+    func tryGetStrs(name: string) -> (*Vector<string>, error) {
+        // The set that holds the flag, or the leaf's own set when nothing does
+        fset, e := ctxRequireE(self.chain, name)
+        if e.exists() {
+            return ((*fset).none, e)
+        }
+
+        // Ask the set, which checks the kind
+        return fset.tryGetStrs(name)
+    }
+
+    /**
+     * tryGetCount
+     * Gives how many times the count flag name was named, as resolved along the chain
+     * @param name {string} - the long name
+     * @return the count and a clean error, or 0 and the error naming the flag
+     **/
+    func tryGetCount(name: string) -> (int64, error) {
+        // The set that holds the flag
+        fset, e := ctxRequireE(self.chain, name)
+        if e.exists() {
+            return (0, e)
+        }
+
+        // Ask the set, which checks the kind
+        return fset.tryGetCount(name)
+    }
+
+    /**
+     * tryChanged
+     * Checks if name was set on the command line
+     * @param name {string} - the long name
+     * @return the answer and a clean error, or false and the error naming the flag
+     **/
+    func tryChanged(name: string) -> (bool, error) {
+        // The set that holds the flag
+        fset, e := ctxRequireE(self.chain, name)
+        if e.exists() {
+            return (false, e)
+        }
+
+        // Ask the set
+        return fset.tryChanged(name)
+    }
+
+    /**
+     * trySource
+     * Gives where the value of name came from, the command line, the environment, a config file or the declaration itself
+     * @param name {string} - the long name
+     * @return the source and a clean error, or SDefault and the error naming the flag
+     **/
+    func trySource(name: string) -> (FlagSource, error) {
+        // The set that holds the flag
+        fset, e := ctxRequireE(self.chain, name)
+        if e.exists() {
+            return (FlagSource.SDefault, e)
+        }
+
+        // Ask the set
+        return fset.trySource(name)
+    }
+
+    /**
      * arg
      * Gives the positional arg at index i, aborts when out of range
      * @param i {int64} - the index
      * @return the arg
      **/
     func arg(i: int64) -> string {
-        // The arg vector
-        a: *Vector<string> = self.args
-
-        // Return the arg at i
-        return vec_get(a, i)
+        // The arg, aborting on a refusal
+        v, e := self.tryArg(i)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+        return v
     }
 
     /**
      * getBool
-     * Gives the value of the bool flag name as resolved along the chain
+     * Gives the value of the bool flag name as resolved along the chain, aborts when no bool flag of that name is on it
      * @param name {string} - the long name
      * @return the value
      **/
     func getBool(name: string) -> bool {
-        // The chain
-        chain: *Vector<*Command> = self.chain
-
-        // The set that holds the flag
-        fset: *FlagSet = ctxRequire(chain, name)
-
-        // Return the value from the set
-        return fset.getBool(name)
+        // The value, aborting on a refusal
+        v, e := self.tryGetBool(name)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+        return v
     }
 
     /**
      * getStr
-     * Gives the value of the string or choice flag name as resolved along the chain
+     * Gives the value of the string or choice flag name as resolved along the chain, aborts when no such flag is on it
      * @param name {string} - the long name
      * @return the value
      **/
     func getStr(name: string) -> string {
-        // The chain
-        chain: *Vector<*Command> = self.chain
-
-        // The set that holds the flag
-        fset: *FlagSet = ctxRequire(chain, name)
-
-        // Return the value from the set
-        return fset.getStr(name)
+        // The value, aborting on a refusal
+        v, e := self.tryGetStr(name)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+        return v
     }
 
     /**
      * getInt
-     * Gives the value of the int flag name as resolved along the chain
+     * Gives the value of the int flag name as resolved along the chain, aborts when no int flag of that name is on it
      * @param name {string} - the long name
      * @return the value
      **/
     func getInt(name: string) -> int64 {
-        // The chain
-        chain: *Vector<*Command> = self.chain
-
-        // The set that holds the flag
-        fset: *FlagSet = ctxRequire(chain, name)
-
-        // Return the value from the set
-        return fset.getInt(name)
+        // The value, aborting on a refusal
+        v, e := self.tryGetInt(name)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+        return v
     }
 
     /**
      * getFloat
-     * Gives the value of the float flag name as resolved along the chain
+     * Gives the value of the float flag name as resolved along the chain, aborts when no float flag of that name is on it
      * @param name {string} - the long name
      * @return the value
      **/
     func getFloat(name: string) -> float64 {
-        // The chain
-        chain: *Vector<*Command> = self.chain
-
-        // The set that holds the flag
-        fset: *FlagSet = ctxRequire(chain, name)
-
-        // Return the value from the set
-        return fset.getFloat(name)
+        // The value, aborting on a refusal
+        v, e := self.tryGetFloat(name)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+        return v
     }
 
     /**
      * getStrs
-     * Gives the items of the string slice flag name as resolved along the chain
+     * Gives the items of the string slice flag name as resolved along the chain, aborts when no such flag is on it
      * @param name {string} - the long name
      * @return the items, borrowed from the flag and never freed by the caller
      **/
     func getStrs(name: string) -> *Vector<string> {
-        // The chain
-        chain: *Vector<*Command> = self.chain
-
-        // The set that holds the flag
-        fset: *FlagSet = ctxRequire(chain, name)
-
-        // Return the value from the set
-        return fset.getStrs(name)
+        // The items, aborting on a refusal
+        v0, e := self.tryGetStrs(name)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+        v: *Vector<string> = v0
+        return v
     }
 
     /**
      * getCount
-     * Gives how many times the count flag name was named, as resolved along the chain
+     * Gives how many times the count flag name was named, as resolved along the chain, aborts when no count flag of that name is on it
      * @param name {string} - the long name
      * @return the count
      **/
     func getCount(name: string) -> int64 {
-        // The chain
-        chain: *Vector<*Command> = self.chain
-
-        // The set that holds the flag
-        fset: *FlagSet = ctxRequire(chain, name)
-
-        // Return the value from the set
-        return fset.getCount(name)
+        // The count, aborting on a refusal
+        v, e := self.tryGetCount(name)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+        return v
     }
 
     /**
      * changed
-     * Checks if name was set on the command line
+     * Checks if name was set on the command line, aborts when no command on the chain declares it
      * @param name {string} - the long name
      * @return true when set
      **/
     func changed(name: string) -> bool {
-        // The chain
-        chain: *Vector<*Command> = self.chain
-
-        // The set that holds the flag
-        fset: *FlagSet = ctxRequire(chain, name)
-
-        // Return the changed bit from the set
-        return fset.changed(name)
+        // The answer, aborting on a refusal
+        v, e := self.tryChanged(name)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+        return v
     }
 
     /**
      * source
-     * Gives where the value of name came from, the command line, the environment, a config file or the declaration itself
+     * Gives where the value of name came from, the command line, the environment, a config file or the declaration itself, aborts when no command on the chain declares it
      * @param name {string} - the long name
      * @return the source
      **/
     func source(name: string) -> FlagSource {
-        // The chain
-        chain: *Vector<*Command> = self.chain
-
-        // The set that holds the flag
-        fset: *FlagSet = ctxRequire(chain, name)
-
-        // Return the source from the set
-        return fset.source(name)
+        // The source, aborting on a refusal
+        v, e := self.trySource(name)
+        if e.exists() {
+            novaFaultMsg(e.message)
+        }
+        return v
     }
 
     /**
@@ -402,35 +570,69 @@ impl Context {
     }
 
     /**
-     * printHelp
-     * Prints the running command's help through the nearest help func on the chain, or the default renderer to the out sink
-     * @return nothing
+     * tryPrintHelp
+     * Prints the running command's help through the nearest help func on the chain, or the default renderer to the out sink, a default rendering over the root's help limit printing nothing and coming back as the error
+     * @return a clean error, or the help limit error
      **/
-    func printHelp() -> void {
+    func tryPrintHelp() -> error {
         // A context of the same shape, since a method cannot hand its own receiver on as a pointer
         tmp: *Context = alloc(Context { cmd: self.cmd, root: self.root, chain: self.chain, args: self.args, argv: self.argv })
 
         // Print the help through whatever the chain resolves to
-        helpDispatch(tmp)
+        e: error = helpDispatchE(tmp)
 
         // Free the copy
         free(tmp)
+        return e
     }
 
     /**
-     * printUsage
-     * Prints the running command's usage block through the nearest usage func on the chain, or the default renderer to the err sink
-     * @return nothing
+     * tryPrintUsage
+     * Prints the running command's usage block through the nearest usage func on the chain, or the default renderer to the err sink, a default rendering over the root's help limit printing nothing and coming back as the error
+     * @return a clean error, or the help limit error
      **/
-    func printUsage() -> void {
+    func tryPrintUsage() -> error {
         // A context of the same shape, since a method cannot hand its own receiver on as a pointer
         tmp: *Context = alloc(Context { cmd: self.cmd, root: self.root, chain: self.chain, args: self.args, argv: self.argv })
 
         // Print the usage through whatever the chain resolves to
-        usageDispatch(tmp)
+        e: error = usageDispatchE(tmp)
 
         // Free the copy
         free(tmp)
+        return e
+    }
+
+    /**
+     * printHelp
+     * Prints the running command's help through the nearest help func on the chain, or the default renderer to the out sink, a help text over the root's limit writes an Error: line to the err sink instead
+     * @return nothing
+     **/
+    func printHelp() -> void {
+        // Print it and report a refusal on the err sink
+        e: error = self.tryPrintHelp()
+        if e.exists() {
+            line: string = textCat3("Error: ", e.message, "\n")
+            sinkWrite(sinkResolveErr(self.chain), line)
+            free(line)
+            free(e.message)
+        }
+    }
+
+    /**
+     * printUsage
+     * Prints the running command's usage block through the nearest usage func on the chain, or the default renderer to the err sink, a usage text over the root's limit writes an Error: line to the err sink instead
+     * @return nothing
+     **/
+    func printUsage() -> void {
+        // Print it and report a refusal on the err sink
+        e: error = self.tryPrintUsage()
+        if e.exists() {
+            line: string = textCat3("Error: ", e.message, "\n")
+            sinkWrite(sinkResolveErr(self.chain), line)
+            free(line)
+            free(e.message)
+        }
     }
 
     /**

@@ -1,0 +1,2 @@
+Error: invalid argument "1e400" for "--rate" flag: out of range for a 64 bit float
+Run 'strict show --help' for usage.

@@ -1,0 +1,169 @@
+/**
+ * nova/number.dusk
+ * The number grammars the flag parser accepts, textParseInt for int and count flags and textParseFloat for float flags, both stated here byte by byte so nothing the C library would quietly take, such as leading whitespace, a hex prefix, inf or nan, gets through
+ * An int is an optional + or - then one or more ASCII digits and must fit an int64, a float is an optional sign, digits with an optional fraction or a fraction alone, then an optional e or E exponent with an optional sign and at least one digit, and must stay finite
+ **/
+@paradigm oop
+@paradigm procedural
+
+@import std.string
+@import text
+
+/**
+ * textParseInt
+ * Parses a base ten int64 with an explicit grammar, an optional + or - and then one or more ASCII digits, nothing else, so whitespace, a hex or octal prefix, an exponent, a fraction, a lone sign and the empty string are all refused and a value outside the int64 range is refused rather than wrapped
+ * @param s {string} - the text, borrowed
+ * @return the value and an error, the message is "expected an integer" for text outside the grammar and "out of range for a 64 bit integer" for a value that does not fit
+ **/
+export func textParseInt(s: string) -> (int64, error) {
+    // The length of the text
+    n: int64 = str_len(s)
+
+    // Whether the text opens with a sign, and whether that sign is a minus
+    signed: bool = n > 0 && (s[0] == 43 || s[0] == 45)
+    neg: bool = n > 0 && s[0] == 45
+
+    // Where the digits start, past the sign
+    mut i: int64 = if signed { 1 } else { 0 }
+
+    // A sign alone or nothing at all holds no digits
+    if i >= n {
+        return (0, error { message: "expected an integer" })
+    }
+
+    // Check every byte after the sign is a digit before any arithmetic
+    if textDigitRun(s, i) != n - i {
+        return (0, error { message: "expected an integer" })
+    }
+
+    // The value built up below zero, so the most negative int64 fits as well
+    mut acc: int64 = 0
+    while i < n {
+        // The current digit as a number
+        c: int64 = s[i]
+        d: int64 = c - 48
+
+        // One more digit would go past the int64 minimum
+        if acc < -922337203685477580 || (acc == -922337203685477580 && d > 8) {
+            return (0, error { message: "out of range for a 64 bit integer" })
+        }
+
+        // Shift the digit in
+        acc = acc * 10 - d
+        i = i + 1
+    }
+
+    // A negative value is already in place
+    if neg {
+        return (acc, error {})
+    }
+
+    // The minimum has no positive twin
+    if acc < -9223372036854775807 {
+        return (0, error { message: "out of range for a 64 bit integer" })
+    }
+
+    // Flip it over to the positive side
+    return (0 - acc, error {})
+}
+
+/**
+ * textDigitRun
+ * Counts the ASCII digits of s starting at byte i, the scan both grammars run for each digit run
+ * @param s {string} - the text, borrowed
+ * @param i {int64} - the byte to start at
+ * @return how many digits follow, 0 when i is past the end
+ **/
+export func textDigitRun(s: string, i: int64) -> int64 {
+    // The length of the text
+    n: int64 = str_len(s)
+
+    // Walk forward while the bytes are digits
+    mut k: int64 = i
+    while k < n && textIsDigit(s[k]) {
+        k = k + 1
+    }
+
+    // Return how many were seen, never negative
+    if k < i {
+        return 0
+    }
+    return k - i
+}
+
+/**
+ * textIsDecimalFloat
+ * Checks s against the float grammar nova accepts, an optional sign, digits with an optional fraction or a fraction alone, then an optional e or E with an optional sign and digits, so "1", "-2.5", ".5", "5.", "1e3" and "+2.5E-3" pass while " 1", "0x1p3", "inf", "nan", "1e" and "." do not
+ * @param s {string} - the text, borrowed
+ * @return true when the whole text matches
+ **/
+export func textIsDecimalFloat(s: string) -> bool {
+    // The length of the text
+    n: int64 = str_len(s)
+
+    // The cursor, past an optional sign
+    mut i: int64 = if n > 0 && (s[0] == 43 || s[0] == 45) { 1 } else { 0 }
+
+    // The whole number digits
+    whole: int64 = textDigitRun(s, i)
+    i = i + whole
+
+    // The fraction digits after an optional dot
+    mut frac: int64 = 0
+    if i < n && s[i] == 46 {
+        frac = textDigitRun(s, i + 1)
+        i = i + 1 + frac
+    }
+
+    // At least one digit on one side of the dot
+    if whole == 0 && frac == 0 {
+        return false
+    }
+
+    // An optional exponent, which needs digits of its own
+    if i < n && (s[i] == 101 || s[i] == 69) {
+        // Step over the letter and an optional sign
+        i = i + 1
+        if i < n && (s[i] == 43 || s[i] == 45) {
+            i = i + 1
+        }
+
+        // The exponent digits
+        ex: int64 = textDigitRun(s, i)
+        if ex == 0 {
+            return false
+        }
+        i = i + ex
+    }
+
+    // Nothing may follow
+    return i == n
+}
+
+/**
+ * textParseFloat
+ * Parses a float64 under the grammar textIsDecimalFloat states, a value too large for a float64 is refused rather than turned into infinity and one too small rounds toward zero the way the C library does
+ * @param s {string} - the text, borrowed
+ * @return the value and an error, the message is "expected a number" for text outside the grammar and "out of range for a 64 bit float" for a value that overflows
+ **/
+export func textParseFloat(s: string) -> (float64, error) {
+    // Text outside the grammar never reaches the C parser
+    if !textIsDecimalFloat(s) {
+        return (0.0, error { message: "expected a number" })
+    }
+
+    // The runtime's own parser, which the grammar check leaves nothing odd to read
+    x, e := parse_float(s)
+    if e.exists() {
+        return (0.0, error { message: "expected a number" })
+    }
+
+    // An infinity minus itself is not equal to itself, which is how an overflow shows
+    d: float64 = x - x
+    if d != d {
+        return (0.0, error { message: "out of range for a 64 bit float" })
+    }
+
+    // Return the value
+    return (x, error {})
+}

@@ -1,0 +1,326 @@
+/**
+ * nova/validate.dusk
+ * novaValidate, one walk over a whole command tree that reports every declaration problem it has, so a program can check once at start and then run argv against a tree nothing in it can abort on
+ * A loop in a tree has to run through the root, since every other command can only ever get one parent, so a root that was added as a child is reported and its children left unwalked, which is what keeps the walk finite, and novaExecuteE runs the walk before anything else under a strict root and refuses to run a tree it finds a problem in
+ * A command deeper than the depth limit is not a problem here, it is declared fine and a run that names it is refused with an ordinary usage error
+ **/
+@paradigm oop
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import flagset
+@import flaggroup
+@import text
+@import command
+
+// Pushes the problem "<a><b><c>" onto out as a fresh heap string
+func validPush(out: *Vector<string>, a: string, b: string, c: string) -> void {
+    // Join the three pieces and keep them
+    vec_push(out, textCat3(a, b, c))
+}
+
+// Pushes the problem "<a><b><c><d><e>" onto out as a fresh heap string
+func validPush5(out: *Vector<string>, a: string, b: string, c: string, d: string, e: string) -> void {
+    // Join the five pieces and keep them
+    vec_push(out, textCat5(a, b, c, d, e))
+}
+
+// Pushes the problem "<a><b><c><d><e><f>" onto out as a fresh heap string
+func validPush6(out: *Vector<string>, a: string, b: string, c: string, d: string, e: string, f: string) -> void {
+    // The first five pieces, then the sixth after them
+    head: string = textCat5(a, b, c, d, e)
+    vec_push(out, head + f)
+
+    // Free the halfway result
+    free(head)
+}
+
+// Checks one word a command answers to, its name or an alias, can be typed and reached
+func validWord(out: *Vector<string>, path: string, word: string, what: string) -> void {
+    // An empty word would match an empty argument, the path then ends in the space before the missing name
+    if word == "" {
+        t: string = trim(path)
+        validPush5(out, "", what, " of '", t, "' is empty")
+        free(t)
+        return
+    }
+
+    // A word starting with a dash is read as a flag and never as a command
+    if starts_with(word, "-") {
+        validPush6(out, what, " '", word, "' of '", path, "' starts with a dash")
+    }
+}
+
+// Checks every flag of one set, its shape, duplicates inside the set, the choice default and an env binding under strict
+func validFlagSet(out: *Vector<string>, fset: *FlagSet, path: string, strict: bool) -> void {
+    // Loop over the flags in declaration order
+    mut i: int64 = 0
+    while i < fset.len() {
+        // The current flag
+        f: *Flag = fset.get(i)
+
+        // A name or shorthand the parser could never reach
+        se: error = flagNameShapeErr((*f).name, (*f).short)
+        if se.exists() {
+            validPush5(out, se.message, " on '", path, "'", "")
+            free(se.message)
+        }
+
+        // A long name or shorthand an earlier flag of the set already took
+        mut j: int64 = 0
+        while j < i {
+            g: *Flag = fset.get(j)
+            if (*g).name == (*f).name {
+                validPush5(out, "flag '--", (*f).name, "' is declared twice on '", path, "'")
+            } else if (*f).short != "" && (*g).short == (*f).short {
+                validPush5(out, "shorthand '-", (*f).short, "' is declared twice on '", path, "'")
+            }
+            j = j + 1
+        }
+
+        // A choice whose default is not one of its alternatives
+        if flagKindEq((*f).kind, FlagKind.KChoice) && !vec_contains((*f).choices, (*f).defS) {
+            validPush5(out, "default for flag '--", (*f).name, "' of '", path, "' is not one of its choices")
+        }
+
+        // An environment binding under strict
+        if strict && (*f).env != "" {
+            validPush5(out, "flag '--", (*f).name, "' of '", path, "' is bound to an environment variable, which is not allowed under strict mode")
+        }
+        i = i + 1
+    }
+}
+
+// Checks the children of c never share a name or an alias, which addAlias after addCommand can still bring about
+func validKids(out: *Vector<string>, c: *Command, path: string) -> void {
+    // Every word some earlier child answers to
+    seen: *Vector<string> = alloc(vec_new())
+
+    // Loop over the children in the order they were added
+    kids: *Vector<*Command> = (*c).kids
+    mut i: int64 = 0
+    while i < vec_len(kids) {
+        // The current child and the words it answers to, its name first
+        k: *Command = vec_get(kids, i)
+        words: *Vector<string> = alloc(vec_new())
+        vec_push(words, (*k).name)
+        aliases: *Vector<string> = (*k).aliases
+        mut a: int64 = 0
+        while a < vec_len(aliases) {
+            vec_push(words, vec_get(aliases, a))
+            a = a + 1
+        }
+
+        // A word already taken by an earlier child, or twice by this one
+        mut w: int64 = 0
+        while w < vec_len(words) {
+            word: string = vec_get(words, w)
+            if vec_contains(seen, word) {
+                validPush5(out, "'", word, "' names two children of '", path, "'")
+            } else {
+                vec_push(seen, word)
+            }
+            w = w + 1
+        }
+
+        // Free this child's word list, the strings belong to the tree
+        vec_free(words)
+        free(words)
+        i = i + 1
+    }
+
+    // Free the list of seen words
+    vec_free(seen)
+    free(seen)
+}
+
+// Checks every name a flag group or a completion func of c lists is declared on c
+func validNames(out: *Vector<string>, c: *Command, path: string) -> void {
+    // The two sets a name may be declared in
+    lf: *FlagSet = (*c).flags
+    pf: *FlagSet = (*c).pflags
+
+    // The names every flag group lists
+    groups: *Vector<*FlagGroup> = (*c).groups
+    mut i: int64 = 0
+    while i < vec_len(groups) {
+        g: *FlagGroup = vec_get(groups, i)
+        gnames: *Vector<string> = (*g).names
+        mut j: int64 = 0
+        while j < vec_len(gnames) {
+            n: string = vec_get(gnames, j)
+            if !lf.has(n) && !pf.has(n) {
+                validPush5(out, "flag group on '", path, "' names '--", n, "' which is not declared there")
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // The name every completion func is registered under
+    comps: *Vector<*FlagCompFunc> = (*c).compFuncs
+    mut k: int64 = 0
+    while k < vec_len(comps) {
+        e: *FlagCompFunc = vec_get(comps, k)
+        if !lf.has((*e).name) && !pf.has((*e).name) {
+            validPush5(out, "completion func on '", path, "' is for '--", (*e).name, "' which is not declared there")
+        }
+        k = k + 1
+    }
+}
+
+// Checks the strict rules on one command, no env prefix, no config file or flag and no handler that writes files
+func validStrict(out: *Vector<string>, c: *Command, path: string) -> void {
+    // An env prefix turns environment binding on
+    if (*c).envPrefix != "" {
+        validPush(out, "env prefix on '", path, "' is not allowed under strict mode")
+    }
+
+    // A default config file turns config binding on
+    if (*c).configFile != "" {
+        validPush(out, "config file on '", path, "' is not allowed under strict mode")
+    }
+
+    // A config flag turns config binding on
+    if (*c).configFlag != "" {
+        validPush(out, "config flag on '", path, "' is not allowed under strict mode")
+    }
+
+    // A handler that writes files, such as the docs command
+    if (*c).opensFiles {
+        validPush(out, "command '", path, "' writes files, which is not allowed under strict mode")
+    }
+}
+
+// Checks the switches and limits that only count on the root are set nowhere else, and are not negative on the root
+func validRootOnly(out: *Vector<string>, c: *Command, path: string, isRoot: bool) -> void {
+    // Whether any limit is set at all, and whether one is negative
+    anySet: bool = (*c).maxArgs != 0 || (*c).maxArgLen != 0 || (*c).maxValues != 0 || (*c).maxDepth != 0 || (*c).maxHelpBytes != 0
+    anyNeg: bool = (*c).maxArgs < 0 || (*c).maxArgLen < 0 || (*c).maxValues < 0 || (*c).maxDepth < 0 || (*c).maxHelpBytes < 0
+
+    // The root may set them, just not below zero
+    if isRoot {
+        if anyNeg {
+            validPush(out, "a limit on '", path, "' is negative")
+        }
+        if (*c).hasParent {
+            validPush(out, "root '", path, "' was added as a child of another command, its children are not checked")
+        }
+        return
+    }
+
+    // Anywhere else they have no effect, which is worth saying
+    if (*c).strict {
+        validPush(out, "'", path, "' sets strict but is not the root, only the root's switch counts")
+    }
+    if anySet {
+        validPush(out, "'", path, "' sets a limit but is not the root, only the root's limits count")
+    }
+}
+
+// Runs every check on one command of the walk
+func validOne(out: *Vector<string>, c: *Command, path: string, isRoot: bool, strict: bool) -> void {
+    // The words the command answers to, the root's name is never typed so it is left alone
+    if !isRoot {
+        validWord(out, path, (*c).name, "name")
+        aliases: *Vector<string> = (*c).aliases
+        mut a: int64 = 0
+        while a < vec_len(aliases) {
+            validWord(out, path, vec_get(aliases, a), "alias")
+            a = a + 1
+        }
+    }
+
+    // Both flag sets, the names its groups and completion funcs list, and its children
+    validFlagSet(out, (*c).flags, path, strict)
+    validFlagSet(out, (*c).pflags, path, strict)
+    validNames(out, c, path)
+    validKids(out, c, path)
+
+    // The strict rules and the root only settings
+    if strict {
+        validStrict(out, c, path)
+    }
+    validRootOnly(out, c, path, isRoot)
+}
+
+/**
+ * novaValidateProblems
+ * Walks the tree under rootc breadth first and collects one line per declaration problem, a child named twice, a name or flag the parser could never reach, a flag group or completion func naming an undeclared flag, a choice default outside its choices, a root linked under another command, a misplaced or negative limit, and under strict every env prefix, config file, config flag, env bound flag and command that writes files
+ * @param rootc {*Command} - the root of the tree, borrowed and left untouched
+ * @return a fresh vector of fresh heap strings in walk order, empty when the tree is sound, the caller frees both
+ **/
+export func novaValidateProblems(rootc: *Command) -> *Vector<string> {
+    // The problems found and the strict switch
+    out: *Vector<string> = alloc(vec_new())
+    strict: bool = (*rootc).strict
+
+    // A root under another command may sit in a loop, so nothing below it is walked
+    looped: bool = (*rootc).hasParent
+
+    // The worklist, a command with its path, the paths owned here
+    work: *Vector<*Command> = alloc(vec_new())
+    paths: *Vector<string> = alloc(vec_new())
+    vec_push(work, rootc)
+    vec_push(paths, substring((*rootc).name, 0, str_len((*rootc).name)))
+
+    // Loop over the worklist
+    mut w: int64 = 0
+    while w < vec_len(work) {
+        // The current command and its path
+        c: *Command = vec_get(work, w)
+        path: string = vec_get(paths, w)
+
+        // Every check on the command itself
+        validOne(out, c, path, w == 0, strict)
+
+        // Queue the children with their paths, unless the root may lead back to itself
+        if !looped {
+            kids: *Vector<*Command> = (*c).kids
+            mut i: int64 = 0
+            while i < vec_len(kids) {
+                k: *Command = vec_get(kids, i)
+                vec_push(work, k)
+                vec_push(paths, textCat3(path, " ", (*k).name))
+                i = i + 1
+            }
+        }
+        w = w + 1
+    }
+
+    // Free the worklist and the paths
+    vec_free(work)
+    free(work)
+    textFreeStrings(paths)
+    vec_free(paths)
+    free(paths)
+    return out
+}
+
+/**
+ * novaValidate
+ * Reports every declaration problem the tree under rootc has, one per line, so a program can refuse to start on a tree that is not sound, see novaValidateProblems for what is checked
+ * @param rootc {*Command} - the root of the tree, borrowed and left untouched
+ * @return a clean error for a sound tree, or one whose message holds every problem, one per line, a fresh heap string the caller may free
+ **/
+export func novaValidate(rootc: *Command) -> error {
+    // Every problem the walk finds
+    problems: *Vector<string> = novaValidateProblems(rootc)
+
+    // A sound tree
+    if vec_len(problems) == 0 {
+        vec_free(problems)
+        free(problems)
+        return error {}
+    }
+
+    // Every problem on its own line
+    msg: string = str_join(problems, "\n")
+
+    // Free the lines and the vector
+    textFreeStrings(problems)
+    vec_free(problems)
+    free(problems)
+    return error { message: msg }
+}

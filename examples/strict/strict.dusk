@@ -1,0 +1,413 @@
+// strict is the example for a program that runs with more privilege than the
+// person typing its arguments, the shape a tool run as root has. The root turns
+// strict mode on, so nova reads no environment variable and opens no file, and
+// sets every limit low enough that the goldens can go over each one. The tree is
+// built with the try forms only and checked with novaValidate before argv is
+// touched, so nothing argv holds can abort the process. Build it from this
+// directory with dusk build strict.dusk, and note that the nova entry beside this
+// file is a symlink to the library at the repository root.
+@paradigm oop
+@paradigm procedural
+
+// The nova library: the command tree, the run context, flags, argument rules,
+// sinks, the executor, the validator and the tree free walk
+@import nova.command
+@import nova.context
+@import nova.flagset
+@import nova.args
+@import nova.sink
+@import nova.exec
+@import nova.validate
+@import nova.freetree
+@import nova.doc
+
+// StringBuilder, str_join, repeat and the Vector the string slice getter hands back
+@import std.string
+@import std.vector
+
+/**
+ * firstErr
+ * Keeps the first of two errors, so a run of declarations can be checked once at the end
+ * @param a {error} - the error so far
+ * @param b {error} - the error of the latest declaration
+ * @return a when it is set, else b
+ **/
+func firstErr(a: error, b: error) -> error {
+    // The earlier error wins and the later one is dropped
+    if a.exists() {
+        b.ignore()
+        return a
+    }
+
+    // Otherwise whatever the latest declaration gave
+    return b
+}
+
+/**
+ * showList
+ * Prints one labelled list, its items joined with commas inside brackets
+ * @param ctx {*Context} - the run context, whose out sink the line goes to
+ * @param label {string} - the name the list is printed under
+ * @param v {*Vector<string>} - the items, borrowed
+ * @return void
+ **/
+func showList(ctx: *Context, label: string, v: *Vector<string>) -> void {
+    // The items joined with commas
+    joined: string = str_join(v, ",")
+
+    // The label and the list
+    line: string = f"{label}=[{joined}]"
+    ctx.println(line)
+
+    // Free the two built strings
+    free(line)
+    free(joined)
+}
+
+/**
+ * showSourced
+ * Prints one labelled value with the word for where it came from
+ * @param ctx {*Context} - the run context, whose out sink the line goes to
+ * @param label {string} - the flag name the value is printed under
+ * @param value {string} - the value as text, borrowed
+ * @return int32 - 0, or the exit code ctx.fail gives when the flag is missing
+ **/
+func showSourced(ctx: *Context, label: string, value: string) -> int32 {
+    // Where the value came from, which under strict is only ever the line or the default
+    src, e := ctx.trySource(label)
+    if e.exists() {
+        return ctx.fail(e.message)
+    }
+
+    // The line with its source word
+    word: string = flagSourceWord(src)
+    line: string = f"{label}={value} ({word})"
+    ctx.println(line)
+    free(line)
+    return 0
+}
+
+/**
+ * runShow
+ * Prints every flag show declares through the try getters, along with the positionals
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, 0 unless a getter misses
+ **/
+func runShow(ctx: *Context) -> int32 {
+    // The string flag and its source
+    name, ne := ctx.tryGetStr("name")
+    if ne.exists() {
+        return ctx.fail(ne.message)
+    }
+    showSourced(ctx, "name", name)
+
+    // The int flag, as text, and its source
+    port, pe := ctx.tryGetInt("port")
+    if pe.exists() {
+        return ctx.fail(pe.message)
+    }
+    ps: string = int_to_string(port)
+    showSourced(ctx, "port", ps)
+    free(ps)
+
+    // The float flag, as text, and its source
+    rate, re := ctx.tryGetFloat("rate")
+    if re.exists() {
+        return ctx.fail(re.message)
+    }
+    rs: string = f"{rate}"
+    showSourced(ctx, "rate", rs)
+    free(rs)
+
+    // The string slice flag
+    tags0, te := ctx.tryGetStrs("tag")
+    if te.exists() {
+        return ctx.fail(te.message)
+    }
+    tags: *Vector<string> = tags0
+    showList(ctx, "tags", tags)
+
+    // The count flag
+    loud, le := ctx.tryGetCount("loud")
+    if le.exists() {
+        return ctx.fail(le.message)
+    }
+    ls: string = f"loud={loud}"
+    ctx.println(ls)
+    free(ls)
+
+    // The choice flag, read back as a string
+    mode, me := ctx.tryGetStr("mode")
+    if me.exists() {
+        return ctx.fail(me.message)
+    }
+    ms: string = f"mode={mode}"
+    ctx.println(ms)
+    free(ms)
+
+    // The positionals
+    showList(ctx, "args", (*ctx).args)
+    return 0
+}
+
+/**
+ * runGetter
+ * Asks for things that are not there through the try forms and prints the error values they give, a getter miss inside a handler being an ordinary value rather than an abort
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runGetter(ctx: *Context) -> int32 {
+    // A flag no command on the chain declares
+    v, e1 := ctx.tryGetStr("missing")
+    if e1.exists() {
+        l1: string = f"tryGetStr: {e1.message} (value \"{v}\")"
+        ctx.println(l1)
+        free(l1)
+    }
+
+    // A declared flag asked for as the wrong kind
+    n, e2 := ctx.tryGetInt("name")
+    if e2.exists() {
+        l2: string = f"tryGetInt: {e2.message} (value {n})"
+        ctx.println(l2)
+        free(l2)
+    }
+
+    // A positional past the end
+    a, e3 := ctx.tryArg(3)
+    if e3.exists() {
+        l3: string = f"tryArg: {e3.message} (value \"{a}\")"
+        ctx.println(l3)
+        free(l3)
+    }
+
+    // A child index past the end of the root's children
+    c, e4 := cmdTryChild((*ctx).root, 99)
+    if e4.exists() {
+        l4: string = f"cmdTryChild: {e4.message} (parent {(*c).name})"
+        ctx.println(l4)
+        free(l4)
+    }
+    return 0
+}
+
+/**
+ * runLevel
+ * Prints the path of the command that ran, what the nest chain does so a golden can tell how deep a run got
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runLevel(ctx: *Context) -> int32 {
+    // The path of the command that ran
+    line: string = "ran " + ctx.commandPath()
+    ctx.println(line)
+    free(line)
+    return 0
+}
+
+/**
+ * runChildOfSide
+ * The handler of the side tree runRefuse builds, which a strict root never lets run
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runChildOfSide(ctx: *Context) -> int32 {
+    // Never printed, the side tree is refused before it gets here
+    ctx.println("child ran")
+    return 0
+}
+
+/**
+ * showRefusal
+ * Prints one labelled line for a declaration, its refusal or that it was let through
+ * @param label {string} - the declaration
+ * @param e {error} - what it gave
+ * @return void
+ **/
+func showRefusal(label: string, e: error) -> void {
+    // A refusal prints its message, anything else says so
+    if e.exists() {
+        println("{}: refused: {}", label, e.message)
+    } else {
+        println("{}: accepted", label)
+    }
+}
+
+/**
+ * runRefuse
+ * Builds a second strict tree that tries to turn on every binding, environment and config file both, against a config file that is really on disk, and shows that the try forms refuse what they can see, that novaValidate reports the rest and that novaExecuteE refuses to run the tree at all
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runRefuse(ctx: *Context) -> int32 {
+    // The side root, strict before anything is declared on it
+    side: *Command = cmdNew("side", "A strict tree that asks for bindings")
+    side.setStrict(true)
+
+    // The root can see its own switch, so it refuses all three outright
+    showRefusal("side trySetEnvPrefix", side.trySetEnvPrefix("STRICT"))
+    showRefusal("side trySetConfigFile", side.trySetConfigFile("examples/strict/strict.json"))
+    showRefusal("side trySetConfigFlag", side.trySetConfigFlag("config"))
+
+    // A child built before it is linked cannot see the root, so it takes the bindings and novaValidate reports them
+    child: *Command = cmdNew("child", "Print the name")
+    child.setRun(runChildOfSide)
+    lf: *FlagSet = child.localFlags()
+    showRefusal("child tryAddStr", lf.tryAddStr("name", "n", "world", "who to greet"))
+    showRefusal("child tryBindEnv", lf.tryBindEnv("name", "STRICT_NAME"))
+    showRefusal("child trySetEnvPrefix", child.trySetEnvPrefix("STRICT"))
+    showRefusal("child trySetConfigFile", child.trySetConfigFile("examples/strict/strict.json"))
+    showRefusal("side tryAddCommand child", side.tryAddCommand(child))
+
+    // The docs command writes files, which strict refuses too
+    showRefusal("side tryAddCommand docs", side.tryAddCommand(docCommandNew()))
+
+    // What the validator finds in the side tree
+    ve: error = novaValidate(side)
+    if ve.exists() {
+        println("novaValidate:")
+        println(ve.message)
+        free(ve.message)
+    }
+
+    // The side tree run with its errors caught in a buffer, which refuses before the child runs
+    errbuf: *StringBuilder = alloc(sb_new())
+    side.setErr(Sink.Buffer(errbuf))
+    words: string[2] = ["side", "child"]
+    code, xe := novaExecuteE(side, collector<string[]>(words[0..words.len]))
+    if xe.exists() {
+        println("novaExecuteE: exit {}, the child never ran, the err sink got:", code)
+        print(sb_cstr(errbuf))
+    }
+
+    // Free the buffer and the side tree
+    sb_free(errbuf)
+    free(errbuf)
+    novaFreeTree(side)
+    return 0
+}
+
+/**
+ * showCmd
+ * Builds the show command, one flag of every kind and any positionals
+ * @return (*Command, error) - the command, and the first declaration it refused
+ **/
+func showCmd() -> (*Command, error) {
+    // The command, name and one line description
+    c: *Command = cmdNew("show [args...]", "Print every flag and where its value came from")
+    c.setArgs(argsAny())
+    c.setRun(runShow)
+
+    // One flag of every kind the parser takes a value for, plus a count
+    lf: *FlagSet = c.localFlags()
+    mut e: error = lf.tryAddStr("name", "n", "world", "who to greet")
+    e = firstErr(e, lf.tryAddInt("port", "p", 8080, "port to show"))
+    e = firstErr(e, lf.tryAddFloat("rate", "r", 0.5, "rate to show"))
+    e = firstErr(e, lf.tryAddStrs("tag", "t", "", "tags to show, repeatable"))
+    e = firstErr(e, lf.tryAddCount("loud", "l", "loudness, repeatable"))
+    e = firstErr(e, lf.tryAddChoice("mode", "m", "fast", "fast,safe", "how to show"))
+    return (c, e)
+}
+
+/**
+ * nestCmd
+ * Builds the nest, deeper, deepest chain, one level past the depth limit the root sets
+ * @return (*Command, error) - the top of the chain, and the first link it refused
+ **/
+func nestCmd() -> (*Command, error) {
+    // The three commands of the chain
+    nest: *Command = cmdNew("nest", "The second level")
+    deeper: *Command = cmdNew("deeper", "The third level, the deepest a run may reach")
+    deepest: *Command = cmdNew("deepest", "The fourth level, past the limit")
+
+    // Only the two deepest run, each printing its path so the goldens can tell which ran
+    deeper.setRun(runLevel)
+    deepest.setRun(runLevel)
+
+    // Link them
+    mut e: error = deeper.tryAddCommand(deepest)
+    e = firstErr(e, nest.tryAddCommand(deeper))
+    return (nest, e)
+}
+
+/**
+ * bigCmd
+ * Builds a command whose help text is over the help limit the root sets
+ * @return *Command - the command
+ **/
+func bigCmd() -> *Command {
+    // The command, name and one line description
+    c: *Command = cmdNew("big", "A command with too much to say")
+
+    // A long description well past the limit, built once and owned by the tree
+    c.setLong(repeat("This line says the same thing again. ", 128))
+    (*c).longOwned = true
+    c.setRun(runLevel)
+    return c
+}
+
+/**
+ * rootCmd
+ * Builds the strict root, its limits and its four children with the try forms only
+ * @return (*Command, error) - the root, and the first declaration anything refused
+ **/
+func rootCmd() -> (*Command, error) {
+    // The root command, name and one line description
+    c: *Command = cmdNew("strict", "Run with no ambient input and small limits")
+    c.setLong("strict reads no environment variable and opens no file, and every limit is set low\nso each one can be shown going over.")
+
+    // Strict mode and the five limits, each one far below its default
+    c.setStrict(true)
+    c.setMaxArgs(16)
+    c.setMaxArgLen(256)
+    c.setMaxFlagValues(4)
+    c.setMaxDepth(3)
+    c.setMaxHelpBytes(2048)
+
+    // The children, each built with the try forms
+    show, e1 := showCmd()
+    nest, e2 := nestCmd()
+    getter: *Command = cmdNew("getter", "Show the try getters handing back errors")
+    getter.setRun(runGetter)
+    refuse: *Command = cmdNew("refuse", "Show a strict tree refusing every binding")
+    refuse.setRun(runRefuse)
+
+    // Link them and keep the first refusal
+    mut e: error = firstErr(e1, e2)
+    e = firstErr(e, c.tryAddCommand(show))
+    e = firstErr(e, c.tryAddCommand(nest))
+    e = firstErr(e, c.tryAddCommand(getter))
+    e = firstErr(e, c.tryAddCommand(refuse))
+    e = firstErr(e, c.tryAddCommand(bigCmd()))
+    return (c, e)
+}
+
+/**
+ * main
+ * Builds the tree, checks it once with novaValidate and hands argv to nova
+ * @param argc {int32} - the argument count, unused here
+ * @param argv {string[]} - the raw command line, program name first
+ * @return int32 - the exit code novaExecuteE produced, 2 for a tree that did not build
+ **/
+func main(argc: int32, argv: string[]) -> int32 {
+    // The tree, and the first declaration it refused
+    root, be := rootCmd()
+    if be.exists() {
+        printerr("strict: " + be.message)
+        return 2
+    }
+
+    // Every declaration problem the tree has, checked once before argv is touched
+    ve: error = novaValidate(root)
+    if ve.exists() {
+        printerr("strict: " + ve.message)
+        return 2
+    }
+
+    // Run the line, the error is already reported through the err sink
+    code, xe := novaExecuteE(root, argv)
+    if xe.exists() {
+        return code
+    }
+    return code
+}

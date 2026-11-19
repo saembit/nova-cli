@@ -1,0 +1,2 @@
+Error: invalid argument "" for "--port" flag: expected an integer
+Run 'strict show --help' for usage.

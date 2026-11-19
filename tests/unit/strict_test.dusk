@@ -1,0 +1,731 @@
+// Unit test root for the privileged use surface, the try forms in flagset.dusk,
+// command.dusk and context.dusk, novaValidate in validate.dusk, the limits in
+// limits.dusk, the number grammars in number.dusk and the strict gate in front of
+// configApply. Run it with cd tests/unit && dusk run strict_test.dusk 2>&1 | diff - strict_test.expected.
+// Every run below points both sinks at buffers so the expected file pins exactly
+// what nova wrote and where. Each argv is a fixed array minted as
+// collector<string[]> for the same reason exec_test does it.
+@paradigm oop
+@paradigm procedural
+
+// Stdlib pieces the assertions lean on
+@import std.string
+@import std.vector
+
+// The library under test
+@import nova.command
+@import nova.context
+@import nova.flagset
+@import nova.args
+@import nova.text
+@import nova.number
+@import nova.sink
+@import nova.exec
+@import nova.config
+@import nova.limits
+@import nova.validate
+@import nova.freetree
+@import nova.doc
+
+// setenv, which the gate case needs, and the runtime's live block registry the leak readings lean on, neither of which dusk itself wraps
+foreign "C" {
+    func setenv(name: *raw char, value: *raw char, overwrite: int32) -> int32
+    func cool_gen_registry_snapshot(ptrs: *raw char, sizes: *raw char) -> int64
+}
+
+/**
+ * showErr
+ * Prints one line for a fallible call, either its error message or ok
+ * @param label {string} - the name the call is reported under
+ * @param e {error} - the error the call returned, possibly a clean one
+ * @return void
+ **/
+func showErr(label: string, e: error) -> void {
+    // Check if the call failed, then print the message it carried
+    if e.exists() {
+        println("{}: err: {}", label, e.message)
+    } else {
+        println("{}: ok", label)
+    }
+}
+
+/**
+ * envSet
+ * Sets one environment variable for the rest of this process
+ * @param name {string} - the variable name
+ * @param value {string} - the value it takes
+ * @return void
+ **/
+func envSet(name: string, value: string) -> void {
+    // The two C strings setenv wants
+    n: *raw char = cbuf(name)
+    v: *raw char = cbuf(value)
+
+    // Set it and say so when it did not take
+    rc: int32 = setenv(n, v, 1)
+    if rc != 0 {
+        println("setenv failed for {}", name)
+    }
+
+    // Free the two buffers
+    free(n)
+    free(v)
+}
+
+/**
+ * testIntGrammar
+ * Runs textParseInt over every shape the grammar takes and refuses
+ * @return void
+ **/
+func testIntGrammar() -> void {
+    println("## int grammar")
+
+    // The inputs, accepted and refused, whitespace included since a golden cmd line cannot carry it
+    inputs: string[19] = ["0", "7", "+7", "-7", "007", "-0", "9223372036854775807", "-9223372036854775808", "9223372036854775808", "-9223372036854775809", "", "+", "-", " 5", "5 ", "\t5", "0x10", "1e3", "1_000"]
+
+    // Loop over them
+    mut i: int64 = 0
+    while i < 19 {
+        n, e := textParseInt(inputs[i])
+        if e.exists() {
+            println("int \"{}\" -> err: {}", inputs[i], e.message)
+        } else {
+            println("int \"{}\" -> {}", inputs[i], n)
+        }
+        i = i + 1
+    }
+}
+
+/**
+ * testFloatGrammar
+ * Runs textParseFloat over every shape the grammar takes and refuses
+ * @return void
+ **/
+func testFloatGrammar() -> void {
+    println("## float grammar")
+
+    // The inputs, accepted and refused
+    inputs: string[22] = ["1", "-2.5", ".5", "5.", "1e3", "+2.5E-3", "1e-400", "1e308", "1e309", "-1e309", "", ".", "e3", "1e", "1e+", " 1", "1 ", "inf", "nan", "infinity", "0x1p3", "1.2.3"]
+
+    // Loop over them
+    mut i: int64 = 0
+    while i < 22 {
+        x, e := textParseFloat(inputs[i])
+        if e.exists() {
+            println("float \"{}\" -> err: {}", inputs[i], e.message)
+        } else {
+            println("float \"{}\" -> {}", inputs[i], x)
+        }
+        i = i + 1
+    }
+}
+
+/**
+ * testFlagSetTry
+ * Exercises every FlagSet try form, its success and each refusal
+ * @return void
+ **/
+func testFlagSetTry() -> void {
+    println("## flagset try forms")
+    fs: *FlagSet = flagsetNew()
+
+    // One declaration of every kind
+    showErr("tryAddBool verbose", fs.tryAddBool("verbose", "v", false, "verbose"))
+    showErr("tryAddStr name", fs.tryAddStr("name", "n", "world", "name"))
+    showErr("tryAddInt port", fs.tryAddInt("port", "p", 8080, "port"))
+    showErr("tryAddFloat rate", fs.tryAddFloat("rate", "r", 1.5, "rate"))
+    showErr("tryAddStrs tag", fs.tryAddStrs("tag", "t", "a,b", "tags"))
+    showErr("tryAddCount loud", fs.tryAddCount("loud", "l", "loud"))
+    showErr("tryAddChoice emit", fs.tryAddChoice("emit", "e", "llvm", "llvm,obj", "emit"))
+
+    // Every refusal a declaration can earn
+    showErr("tryAddBool duplicate name", fs.tryAddBool("verbose", "", false, "again"))
+    showErr("tryAddStr duplicate shorthand", fs.tryAddStr("other", "n", "", "again"))
+    showErr("tryAddInt long shorthand", fs.tryAddInt("wide", "ww", 0, "wide"))
+    showErr("tryAddFloat empty name", fs.tryAddFloat("", "", 0.0, "empty"))
+    showErr("tryAddStrs dash name", fs.tryAddStrs("-x", "", "", "dash"))
+    showErr("tryAddCount eq name", fs.tryAddCount("a=b", "", "eq"))
+    showErr("tryAddBool digit shorthand", fs.tryAddBool("five", "5", false, "digit"))
+    showErr("tryAddBool dash shorthand", fs.tryAddBool("dash", "-", false, "dash"))
+    showErr("tryAddChoice bad default", fs.tryAddChoice("mode", "", "x", "a,b", "mode"))
+    println("declared: {}", fs.len())
+
+    // The marks, on a flag that is there and one that is not
+    showErr("tryMarkRequired name", fs.tryMarkRequired("name"))
+    showErr("tryMarkRequired nope", fs.tryMarkRequired("nope"))
+    showErr("tryMarkHidden nope", fs.tryMarkHidden("nope"))
+    showErr("tryMarkDeprecated nope", fs.tryMarkDeprecated("nope", "gone"))
+    showErr("tryBindEnv nope", fs.tryBindEnv("nope", "NOPE"))
+
+    // Every getter on its own kind, then on the wrong one
+    b, e1 := fs.tryGetBool("verbose")
+    showErr(f"tryGetBool verbose = {b}", e1)
+    s, e2 := fs.tryGetStr("emit")
+    showErr(f"tryGetStr emit = {s}", e2)
+    n, e3 := fs.tryGetInt("port")
+    showErr(f"tryGetInt port = {n}", e3)
+    x, e4 := fs.tryGetFloat("rate")
+    showErr(f"tryGetFloat rate = {x}", e4)
+    v0, e5 := fs.tryGetStrs("tag")
+    v: *Vector<string> = v0
+    showErr(f"tryGetStrs tag len = {vec_len(v)}", e5)
+    c, e6 := fs.tryGetCount("loud")
+    showErr(f"tryGetCount loud = {c}", e6)
+    ch, e7 := fs.tryChanged("port")
+    showErr(f"tryChanged port = {ch}", e7)
+    src, e8 := fs.trySource("port")
+    showErr("trySource port = " + flagSourceWord(src), e8)
+    wb, w1 := fs.tryGetBool("name")
+    showErr(f"tryGetBool name = {wb}", w1)
+    ws, w2 := fs.tryGetStr("port")
+    showErr(f"tryGetStr port = \"{ws}\"", w2)
+    wn, w3 := fs.tryGetInt("nope")
+    showErr(f"tryGetInt nope = {wn}", w3)
+    wx, w4 := fs.tryGetFloat("port")
+    showErr(f"tryGetFloat port = {wx}", w4)
+    wv0, w5 := fs.tryGetStrs("name")
+    wv: *Vector<string> = wv0
+    showErr(f"tryGetStrs name len = {vec_len(wv)}", w5)
+    wc, w6 := fs.tryGetCount("verbose")
+    showErr(f"tryGetCount verbose = {wc}", w6)
+    wch, w7 := fs.tryChanged("nope")
+    showErr(f"tryChanged nope = {wch}", w7)
+    wsrc, w8 := fs.trySource("nope")
+    showErr("trySource nope = " + flagSourceWord(wsrc), w8)
+
+    // The set and its flags go
+    fs.freeAll()
+    free(fs)
+}
+
+/**
+ * compNone
+ * A completion func that offers nothing, registered so the refusals can be shown
+ * @param ctx {*Context} - ignored
+ * @param toComplete {string} - ignored
+ * @return an empty list and the zero directive
+ **/
+func compNone(ctx: *Context, toComplete: string) -> (*Vector<string>, int64) {
+    // The empty list nova frees
+    out: *Vector<string> = alloc(vec_new())
+    return (out, 0)
+}
+
+/**
+ * testCommandTry
+ * Exercises every Command try form, its success and each refusal
+ * @return void
+ **/
+func testCommandTry() -> void {
+    println("## command try forms")
+    root: *Command = cmdNew("app", "app")
+    a: *Command = cmdNew("alpha", "alpha")
+    a.addAlias("al")
+    root.localFlags().addBool("json", "", false, "json")
+    root.localFlags().addBool("yaml", "", false, "yaml")
+
+    // Children, a taken name, a taken alias and a child that already has a parent
+    showErr("tryAddCommand alpha", root.tryAddCommand(a))
+    showErr("tryAddCommand alpha again", root.tryAddCommand(cmdNew("alpha", "dup")))
+    b: *Command = cmdNew("beta", "beta")
+    b.addAlias("al")
+    showErr("tryAddCommand beta with taken alias", root.tryAddCommand(b))
+    other: *Command = cmdNew("other", "other")
+    showErr("tryAddCommand alpha under other", other.tryAddCommand(a))
+    showErr("tryAddCommand beta under other", other.tryAddCommand(b))
+    println("app kids={} beta has parent={}", root.numChildren(), (*b).hasParent)
+
+    // The child index, in range and out of it
+    k0, ke0 := cmdTryChild(root, 0)
+    showErr("cmdTryChild 0 = " + (*k0).name, ke0)
+    k1, ke1 := cmdTryChild(root, 5)
+    showErr("cmdTryChild 5 = " + (*k1).name, ke1)
+    k2, ke2 := cmdTryChild(root, -1)
+    showErr("cmdTryChild -1 = " + (*k2).name, ke2)
+
+    // Completion funcs and flag groups, on a declared name and on one nothing declares
+    showErr("tryRegisterFlagCompletionFunc json", root.tryRegisterFlagCompletionFunc("json", compNone))
+    showErr("tryRegisterFlagCompletionFunc json again", root.tryRegisterFlagCompletionFunc("json", compNone))
+    showErr("tryRegisterFlagCompletionFunc nope", root.tryRegisterFlagCompletionFunc("nope", compNone))
+    showErr("tryMarkFlagsMutuallyExclusive json,yaml", root.tryMarkFlagsMutuallyExclusive("json,yaml"))
+    showErr("tryMarkFlagsOneRequired json,nope", root.tryMarkFlagsOneRequired("json,nope"))
+    showErr("tryMarkFlagsRequiredTogether nope", root.tryMarkFlagsRequiredTogether("nope"))
+    println("app groups={}", vec_len((*root).groups))
+
+    // The bindings, accepted on a plain root and refused once it is strict
+    showErr("trySetEnvPrefix plain", root.trySetEnvPrefix("APP"))
+    showErr("trySetEnvPrefix clear", root.trySetEnvPrefix(""))
+    root.setStrict(true)
+    showErr("trySetEnvPrefix strict", root.trySetEnvPrefix("APP"))
+    showErr("trySetConfigFile strict", root.trySetConfigFile("app.json"))
+    showErr("trySetConfigFlag strict", root.trySetConfigFlag("config"))
+    showErr("trySetEnvPrefix strict clear", root.trySetEnvPrefix(""))
+
+    // The trees go, beta with other since it ended up under it
+    novaFreeTree(root)
+    novaFreeTree(other)
+}
+
+/**
+ * testLimits
+ * Prints the five limits as a plain root, a strict root and a root with every limit set resolve them
+ * @return void
+ **/
+func testLimits() -> void {
+    println("## limits")
+    c: *Command = cmdNew("app", "app")
+    println("plain: args={} arglen={} values={} depth={} help={}", novaMaxArgs(c), novaMaxArgLen(c), novaMaxFlagValues(c), novaMaxDepth(c), novaMaxHelpBytes(c))
+    c.setStrict(true)
+    println("strict: args={} arglen={} values={} depth={} help={}", novaMaxArgs(c), novaMaxArgLen(c), novaMaxFlagValues(c), novaMaxDepth(c), novaMaxHelpBytes(c))
+    c.setMaxArgs(5)
+    c.setMaxArgLen(6)
+    c.setMaxFlagValues(7)
+    c.setMaxDepth(8)
+    c.setMaxHelpBytes(9)
+    println("set: args={} arglen={} values={} depth={} help={}", novaMaxArgs(c), novaMaxArgLen(c), novaMaxFlagValues(c), novaMaxDepth(c), novaMaxHelpBytes(c))
+    novaFreeTree(c)
+}
+
+/**
+ * testValidate
+ * Runs novaValidate over a sound tree, then over one carrying every problem it reports
+ * @return void
+ **/
+func testValidate() -> void {
+    println("## novaValidate")
+
+    // A sound tree, strict and all
+    good: *Command = cmdNew("good", "good")
+    good.setStrict(true)
+    good.addCommand(cmdNew("one", "one"))
+    showErr("sound tree", novaValidate(good))
+    novaFreeTree(good)
+
+    // A strict tree with a problem of every kind
+    bad: *Command = cmdNew("bad", "bad")
+    bad.setStrict(true)
+    bad.setMaxArgs(-1)
+    one: *Command = cmdNew("one", "one")
+    two: *Command = cmdNew("two", "two")
+    bad.addCommand(one)
+    bad.addCommand(two)
+
+    // An alias added after the child was linked, which addCommand could not see
+    two.addAlias("one")
+
+    // A name and an alias the parser could never reach
+    bad.addCommand(cmdNew("", "empty"))
+    three: *Command = cmdNew("three", "three")
+    three.addAlias("-t")
+    bad.addCommand(three)
+
+    // Bindings and a files writing command under strict, set on a child that could not see the root
+    one.setEnvPrefix("BAD")
+    one.setConfigFile("bad.json")
+    one.setConfigFlag("config")
+    one.localFlags().addStr("name", "", "", "name")
+    one.localFlags().bindEnv("name", "NAME")
+    bad.addCommand(docCommandNew())
+
+    // Switches that only count on the root
+    two.setStrict(true)
+    two.setMaxDepth(4)
+
+    // Every problem, one per line
+    showErr("bad tree", novaValidate(bad))
+
+    // The executor refuses the same tree and writes the problems to the err sink only
+    outbuf: *StringBuilder = alloc(sb_new())
+    errbuf: *StringBuilder = alloc(sb_new())
+    bad.setOut(Sink.Buffer(outbuf))
+    bad.setErr(Sink.Buffer(errbuf))
+    a1: string[2] = ["bad", "one"]
+    code, xe := novaExecuteE(bad, collector<string[]>(a1[0..a1.len]))
+    println("novaExecuteE bad one -> {} err={} out bytes={} err bytes={}", code, xe.exists(), sb_size(outbuf), sb_size(errbuf))
+
+    // The same problems without strict leave only the ones strict does not add
+    bad.setStrict(false)
+    showErr("bad tree not strict", novaValidate(bad))
+    novaFreeTree(bad)
+
+    // A root linked under its own child, which is the one way a tree can loop
+    loop: *Command = cmdNew("loop", "loop")
+    kid: *Command = cmdNew("kid", "kid")
+    loop.addCommand(kid)
+    showErr("kid tryAddCommand loop", kid.tryAddCommand(loop))
+    showErr("looped tree", novaValidate(loop))
+
+    // The run is still bounded by the depth limit, so it ends
+    loop.setOut(Sink.Buffer(outbuf))
+    loop.setErr(Sink.Buffer(errbuf))
+    loop.setDisableHelpCmd(true)
+    loop.setDisableCompletionCmd(true)
+    a2: string[5] = ["loop", "kid", "loop", "kid", "loop"]
+    code2, xe2 := novaExecuteE(loop, collector<string[]>(a2[0..a2.len]))
+    println("novaExecuteE looped -> {} err={}", code2, xe2.exists())
+
+    // Free the buffers, the looped tree is left alone since novaFreeTree would walk it forever
+    sb_free(outbuf)
+    free(outbuf)
+    sb_free(errbuf)
+    free(errbuf)
+}
+
+/**
+ * runTry
+ * The handler of the context case, every try getter and tryArg against the flags and positionals of the run
+ * @param ctx {*Context} - the run context nova hands to the handler
+ * @return int32 - the exit code, always 0 here
+ **/
+func runTry(ctx: *Context) -> int32 {
+    // The positionals, in range and out of it
+    a0, e0 := ctx.tryArg(0)
+    showErr("tryArg 0 = " + a0, e0)
+    a9, e9 := ctx.tryArg(9)
+    showErr("tryArg 9 = \"" + a9 + "\"", e9)
+
+    // The inherited bool and the local string and int
+    b, e1 := ctx.tryGetBool("verbose")
+    showErr(f"tryGetBool verbose = {b}", e1)
+    s, e2 := ctx.tryGetStr("name")
+    showErr("tryGetStr name = " + s, e2)
+    n, e3 := ctx.tryGetInt("port")
+    showErr(f"tryGetInt port = {n}", e3)
+
+    // The float, the strings and the count
+    x, e4 := ctx.tryGetFloat("rate")
+    showErr(f"tryGetFloat rate = {x}", e4)
+    v0, e5 := ctx.tryGetStrs("tag")
+    v: *Vector<string> = v0
+    showErr(f"tryGetStrs tag len = {vec_len(v)}", e5)
+    c, e6 := ctx.tryGetCount("loud")
+    showErr(f"tryGetCount loud = {c}", e6)
+
+    // Changed and source
+    ch, e7 := ctx.tryChanged("name")
+    showErr(f"tryChanged name = {ch}", e7)
+    src, e8 := ctx.trySource("port")
+    showErr("trySource port = " + flagSourceWord(src), e8)
+
+    // Misses, a name nothing declares and a name of another kind
+    m1, f1 := ctx.tryGetStr("nope")
+    showErr("tryGetStr nope = \"" + m1 + "\"", f1)
+    m2, f2 := ctx.tryGetBool("name")
+    showErr(f"tryGetBool name = {m2}", f2)
+    m3v0, f3 := ctx.tryGetStrs("nope")
+    m3v: *Vector<string> = m3v0
+    showErr(f"tryGetStrs nope len = {vec_len(m3v)}", f3)
+    m4, f4 := ctx.tryChanged("nope")
+    showErr(f"tryChanged nope = {m4}", f4)
+
+    // Help through the try form, over the root's small help limit
+    showErr("tryPrintHelp", ctx.tryPrintHelp())
+    showErr("tryPrintUsage", ctx.tryPrintUsage())
+    return 0
+}
+
+/**
+ * testContextTry
+ * Runs a command whose handler calls every Context try form
+ * @return void
+ **/
+func testContextTry() -> void {
+    println("## context try forms")
+    root: *Command = cmdNew("app", "app")
+    root.persistentFlags().addBool("verbose", "v", false, "verbose")
+    run: *Command = cmdNew("run", "run")
+    run.setRun(runTry)
+    lf: *FlagSet = run.localFlags()
+    lf.addStr("name", "n", "world", "name")
+    lf.addInt("port", "p", 1, "port")
+    lf.addFloat("rate", "r", 0.5, "rate")
+    lf.addStrs("tag", "t", "", "tags")
+    lf.addCount("loud", "l", "loud")
+    root.addCommand(run)
+    root.setMaxHelpBytes(10)
+    outbuf: *StringBuilder = alloc(sb_new())
+    errbuf: *StringBuilder = alloc(sb_new())
+    root.setOut(Sink.Buffer(outbuf))
+    root.setErr(Sink.Buffer(errbuf))
+    a1: string[9] = ["app", "-v", "run", "-n", "bob", "-t", "a,b", "-ll", "first"]
+    code, xe := novaExecuteE(root, collector<string[]>(a1[0..a1.len]))
+    println("novaExecuteE -> {} err={} out bytes={} err bytes={}", code, xe.exists(), sb_size(outbuf), sb_size(errbuf))
+
+    // The help limit on --help itself is the run's error
+    a2: string[3] = ["app", "run", "--help"]
+    code2, xe2 := novaExecuteE(root, collector<string[]>(a2[0..a2.len]))
+    if xe2.exists() {
+        println("app run --help -> {} {}", code2, xe2.message)
+    }
+    novaFreeTree(root)
+    sb_free(outbuf)
+    free(outbuf)
+    sb_free(errbuf)
+    free(errbuf)
+}
+
+/**
+ * runNothing
+ * A handler that does nothing, for the bound cases
+ * @param ctx {*Context} - ignored
+ * @return int32 - 0
+ **/
+func runNothing(ctx: *Context) -> int32 {
+    // Nothing to do
+    return 0
+}
+
+/**
+ * testBounds
+ * The argument length bound at its default for a plain and a strict root, which a golden cmd line is too short to reach
+ * @return void
+ **/
+func testBounds() -> void {
+    println("## argument length defaults")
+    root: *Command = cmdNew("app", "app")
+    root.setRun(runNothing)
+    errbuf: *StringBuilder = alloc(sb_new())
+    root.setErr(Sink.Buffer(errbuf))
+
+    // The default length and one byte past it
+    ok: string = repeat("a", 65536)
+    big: string = repeat("a", 65537)
+    a1: string[2] = ["app", ok]
+    c1, e1 := novaExecuteE(root, collector<string[]>(a1[0..a1.len]))
+    showErr(f"plain 65536 -> {c1}", e1)
+    a2: string[2] = ["app", big]
+    c2, e2 := novaExecuteE(root, collector<string[]>(a2[0..a2.len]))
+    showErr(f"plain 65537 -> {c2}", e2)
+
+    // The lower strict default
+    root.setStrict(true)
+    sok: string = repeat("a", 16384)
+    sbig: string = repeat("a", 16385)
+    a3: string[2] = ["app", sok]
+    c3, e3 := novaExecuteE(root, collector<string[]>(a3[0..a3.len]))
+    showErr(f"strict 16384 -> {c3}", e3)
+    a4: string[2] = ["app", sbig]
+    c4, e4 := novaExecuteE(root, collector<string[]>(a4[0..a4.len]))
+    showErr(f"strict 16385 -> {c4}", e4)
+    novaFreeTree(root)
+    sb_free(errbuf)
+    free(errbuf)
+}
+
+/**
+ * testConfigGate
+ * Shows the gate in front of configApply, a strict root reads no environment variable and opens no file even when the tree binds both and both are really there
+ * @return void
+ **/
+func testConfigGate() -> void {
+    println("## strict gate in front of configApply")
+    envSet("GATE_NAME", "fromenv")
+
+    // A tree that binds the environment and a config file that is on disk
+    root: *Command = cmdNew("gate", "gate")
+    root.localFlags().addStr("name", "", "world", "name")
+    root.localFlags().addInt("port", "", 0, "port")
+    root.setEnvPrefix("GATE")
+    root.setConfigFile("../../examples/strict/strict.json")
+    chain: *Vector<*Command> = alloc(vec_new())
+    vec_push(chain, root)
+    fs: *FlagSet = (*root).flags
+
+    // Strict, set after the bindings so the gate itself is what stops them
+    root.setStrict(true)
+    showErr("strict configApply", configApply(chain))
+    sn, sne := fs.tryGetStr("name")
+    sp, spe := fs.tryGetInt("port")
+    if !sne.exists() && !spe.exists() {
+        println("strict: name={} ({}) port={} ({})", sn, flagSourceWord(fs.source("name")), sp, flagSourceWord(fs.source("port")))
+    }
+
+    // The same tree not strict, which proves the variable and the file are both there
+    root.setStrict(false)
+    showErr("plain configApply", configApply(chain))
+    pn, pne := fs.tryGetStr("name")
+    pp, ppe := fs.tryGetInt("port")
+    if !pne.exists() && !ppe.exists() {
+        println("plain: name={} ({}) port={} ({})", pn, flagSourceWord(fs.source("name")), pp, flagSourceWord(fs.source("port")))
+    }
+    vec_free(chain)
+    free(chain)
+    novaFreeTree(root)
+}
+
+/**
+ * badBytes
+ * Builds a string holding bytes that are not UTF-8, a lone 0xff, a lead byte 0xc3 with no continuation and a stray continuation 0x80, between words
+ * @return a fresh heap string the caller frees
+ **/
+func badBytes() -> string {
+    // Builder for the text
+    sb: *StringBuilder = alloc(sb_new())
+
+    // Words with the bad bytes between them
+    sb_push(sb, "one ")
+    sb_push_char(sb, 255)
+    sb_push(sb, " two")
+    sb_push_char(sb, 195)
+    sb_push(sb, " three ")
+    sb_push_char(sb, 128)
+    sb_push(sb, "four five six seven")
+
+    // Copy it out and free the builder
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return out
+}
+
+/**
+ * testHelpBytes
+ * Renders help whose description and flag help hold bytes that are not UTF-8, wrapped at a narrow column, which has to come out whole since every scan in nova works on bytes
+ * @return void
+ **/
+func testHelpBytes() -> void {
+    println("## help text with bytes that are not UTF-8")
+    root: *Command = cmdNew("app", "app")
+    text: string = badBytes()
+    root.setLong(text)
+    root.setRun(runNothing)
+    root.setWrapWidth(12)
+    root.localFlags().addStr("name", "n", "", text)
+    outbuf: *StringBuilder = alloc(sb_new())
+    root.setOut(Sink.Buffer(outbuf))
+    a1: string[2] = ["app", "--help"]
+    code, e := novaExecuteE(root, collector<string[]>(a1[0..a1.len]))
+    showErr(f"app --help -> {code}, {sb_size(outbuf)} bytes", e)
+    print(sb_cstr(outbuf))
+    novaFreeTree(root)
+    free(text)
+    sb_free(outbuf)
+    free(outbuf)
+}
+
+/**
+ * live
+ * Gives the number of blocks the runtime has handed out and not taken back, the two buffers the snapshot fills discounted
+ * @return the live block count
+ **/
+func live() -> int64 {
+    // The two out parameters the snapshot writes into
+    a: *raw char = alloc_bytes(8)
+    b: *raw char = alloc_bytes(8)
+
+    // The count, taken while the two buffers are themselves live
+    n: int64 = cool_gen_registry_snapshot(a, b)
+
+    // Free the buffers and take them back out of the count
+    free(a)
+    free(b)
+    return n - 2
+}
+
+/**
+ * dropText
+ * A Func sink that throws the text away, so a leak reading is of nova alone and not of a growing buffer
+ * @param s {string} - ignored
+ * @return void
+ **/
+func dropText(s: string) -> void {
+    // Nothing to keep
+    return
+}
+
+/**
+ * leakLine
+ * Runs one argv three times against root and prints how many blocks the last run left behind, the first run grows the tree with the builtins so only a later one is a reading
+ * @param root {*Command} - the tree
+ * @param label {string} - the case name
+ * @param argv {string[]} - the line
+ * @return void
+ **/
+func leakLine(root: *Command, label: string, argv: string[]) -> void {
+    // The blocks the latest run left behind
+    mut d: int64 = 0
+    mut i: int64 = 0
+    while i < 3 {
+        b0: int64 = live()
+        code, e := novaExecuteE(root, argv)
+        if e.exists() && code == 0 {
+            println("{}: an error with exit 0", label)
+        }
+        d = live() - b0
+        i = i + 1
+    }
+    println("{}: {}", label, d)
+}
+
+/**
+ * testLeaks
+ * Shows that every new refusal path gives back every block it took, the error message nova keeps on the root replacing the last one rather than piling up
+ * @return void
+ **/
+func testLeaks() -> void {
+    println("## per call leak")
+
+    // A strict root with small limits and one child of each shape the cases need
+    root: *Command = cmdNew("app", "app")
+    root.setStrict(true)
+    root.setMaxArgs(4)
+    root.setMaxArgLen(8)
+    root.setMaxFlagValues(2)
+    root.setMaxDepth(2)
+    root.setMaxHelpBytes(64)
+    root.setOut(Sink.Func(dropText))
+    root.setErr(Sink.Func(dropText))
+    run: *Command = cmdNew("run", "run")
+    run.setRun(runNothing)
+    run.localFlags().addInt("port", "p", 1, "port")
+    run.localFlags().addStrs("tag", "t", "", "tags")
+    run.localFlags().addCount("loud", "l", "loud")
+    run.addCommand(cmdNew("deeper", "deeper"))
+    root.addCommand(run)
+
+    // Every refusal and a clean run
+    a1: string[2] = ["app", "run"]
+    leakLine(root, "clean run", collector<string[]>(a1[0..a1.len]))
+    a2: string[6] = ["app", "run", "a", "b", "c", "d"]
+    leakLine(root, "too many args", collector<string[]>(a2[0..a2.len]))
+    a3: string[3] = ["app", "run", "123456789"]
+    leakLine(root, "arg too long", collector<string[]>(a3[0..a3.len]))
+    a4: string[3] = ["app", "run", "deeper"]
+    leakLine(root, "too deep", collector<string[]>(a4[0..a4.len]))
+    a5: string[3] = ["app", "run", "-ta,b,c"]
+    leakLine(root, "too many values", collector<string[]>(a5[0..a5.len]))
+    a6: string[3] = ["app", "run", "-lll"]
+    leakLine(root, "count past limit", collector<string[]>(a6[0..a6.len]))
+    a7: string[3] = ["app", "run", "--help"]
+    leakLine(root, "help over limit", collector<string[]>(a7[0..a7.len]))
+    a8: string[3] = ["app", "run", "-p=1e3"]
+    leakLine(root, "bad int", collector<string[]>(a8[0..a8.len]))
+
+    // A strict tree the validator refuses
+    run.setEnvPrefix("APP")
+    leakLine(root, "refused tree", collector<string[]>(a1[0..a1.len]))
+    novaFreeTree(root)
+}
+
+/**
+ * main
+ * Runs every group of cases in order
+ * @param argc {int32} - unused
+ * @param argv {string[]} - unused
+ * @return int32 - 0
+ **/
+func main(argc: int32, argv: string[]) -> int32 {
+    // Each group prints its own header
+    testIntGrammar()
+    testFloatGrammar()
+    testFlagSetTry()
+    testCommandTry()
+    testLimits()
+    testValidate()
+    testContextTry()
+    testBounds()
+    testConfigGate()
+    testHelpBytes()
+    testLeaks()
+    return 0
+}

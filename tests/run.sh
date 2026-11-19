@@ -11,7 +11,9 @@
 # tests/unit/<name>_test.dusk with a matching .expected file is run too, the
 # recorded stdout of every "<app> completion bash" case is checked with bash -n
 # (and zsh -n where a zsh case exists and zsh is installed, fish is skipped), and
-# tests/complete.sh sources the generated bash scripts and drives them.
+# tests/complete.sh sources the generated bash scripts and drives them, and
+# tests/fuzz.sh throws a few thousand generated argv vectors at two examples under the
+# name fuzz.
 #
 # A case is a directory tests/cases/<name>/ holding:
 #   cmd      required, one line, "<app> <args...>" split on spaces with no quoting,
@@ -261,6 +263,25 @@ if [ -z "$filter" ] || [[ "complete" == *"$filter"* ]]; then
         echo "${red}FAIL${off} complete-drive"
         printf '%s\n' "$out" | sed 's/^/    /'
         fail=$((fail + 1)); failed_names+=("complete-drive")
+    fi
+fi
+
+# ---------------------------------------------------------------- fuzz
+#
+# tests/fuzz.sh replays a few thousand argv vectors a fixed seed generates out of a pool
+# of commands, flags and hostile tokens against the strict and flags examples, and fails
+# on a run that dies by a signal, runs past its time bound, exits with a code nova never
+# gives or writes fatal: to stderr. It runs by default under the name fuzz, so
+# tests/run.sh fuzz runs it alone and any filter it does not match leaves it out.
+
+if [ -z "$filter" ] || [[ "fuzz" == *"$filter"* ]]; then
+    if out="$(bash "$here/fuzz.sh" 2>&1)"; then
+        echo "${green}PASS${off} fuzz"
+        pass=$((pass + 1))
+    else
+        echo "${red}FAIL${off} fuzz"
+        printf '%s\n' "$out" | sed 's/^/    /'
+        fail=$((fail + 1)); failed_names+=("fuzz")
     fi
 fi
 

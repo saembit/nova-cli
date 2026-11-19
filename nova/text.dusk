@@ -43,6 +43,17 @@ export func novaFault(prefix: string, name: string, suffix: string) -> void {
 }
 
 /**
+ * novaFaultMsg
+ * Prints "fatal: nova: <msg>" to stderr and aborts the process, what every aborting form does with the error its try form handed back
+ * @param msg {string} - the message, borrowed
+ * @return nothing, the process aborts
+ **/
+export func novaFaultMsg(msg: string) -> void {
+    // Print the message and abort through the three part form
+    novaFault("", msg, "")
+}
+
+/**
  * textPadRight
  * Pads s with spaces on the right until it is at least width bytes long, nothing is ever truncated
  * @param s {string} - the text to pad

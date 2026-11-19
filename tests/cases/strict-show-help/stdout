@@ -1,0 +1,13 @@
+Print every flag and where its value came from
+
+Usage:
+  strict show [args...] [flags]
+
+Flags:
+  -h, --help             help for show
+  -l, --loud             loudness, repeatable
+  -m, --mode fast|safe   how to show (default "fast")
+  -n, --name string      who to greet (default "world")
+  -p, --port int         port to show (default 8080)
+  -r, --rate float       rate to show (default 0.5)
+  -t, --tag strings      tags to show, repeatable

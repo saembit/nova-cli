@@ -643,12 +643,17 @@ func docWriteNode(subject: *Command, chain: *Vector<*Command>, dir: string) -> e
 
 /**
  * docWriteTree
- * Writes one markdown page per visible command under dir, making the directory when it is missing
+ * Writes one markdown page per visible command under dir, making the directory when it is missing, refused outright under a strict root since strict opens no file
  * @param rootc {*Command} - the root command, its paths already set by novaExecute
  * @param dir {string} - the directory the pages go in, made along with any missing parent
  * @return an empty error on success, or the first mkdir or write failure
  **/
 export func docWriteTree(rootc: *Command, dir: string) -> error {
+    // A strict tree opens no file
+    if (*rootc).strict {
+        return error { message: textCat3("cannot write ", dir, ": writing docs is not allowed under strict mode") }
+    }
+
     // Make the directory before writing into it
     me := docMakeDir(dir)
     if me.exists() {
@@ -708,6 +713,9 @@ export func docCommandNew() -> *Command {
     c.setRun(docCommandRun)
     // Hidden, so an application's own help never lists it and it never documents itself
     c.setHidden(true)
+
+    // Its handler writes files, which novaValidate reports under a strict root
+    (*c).opensFiles = true
 
     // Return the finished command
     return c

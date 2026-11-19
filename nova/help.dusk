@@ -12,6 +12,7 @@
 @import sink
 @import command
 @import context
+@import limits
 
 // The gap between the flag column and its description
 func helpFlagGap() -> int64 {
@@ -541,12 +542,78 @@ export func usagePrint(subject: *Command, chain: *Vector<*Command>) -> void {
 }
 
 /**
- * helpDispatch
- * Prints the help of the command ctx names, through the nearest help func on its chain or the default renderer
- * @param ctx {*Context} - the context naming the command help was asked for
- * @return ...
+ * helpLimitErr
+ * Builds the error a rendered help or usage text over the root's limit earns
+ * @param n {int64} - the size of the text
+ * @param limit {int64} - the limit it went over
+ * @return the error, its message a fresh heap string
  **/
-export func helpDispatch(ctx: *Context) -> void {
+export func helpLimitErr(n: int64, limit: int64) -> error {
+    // Builder for the message
+    sb: *StringBuilder = alloc(sb_new())
+
+    // Push the size and the limit
+    sb_push(sb, "help text is ")
+    sb_push_int(sb, n)
+    sb_push(sb, " bytes, the limit is ")
+    sb_push_int(sb, limit)
+
+    // Copy the builder out and free it
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return error { message: out }
+}
+
+// Renders the default help or usage of the command ctx names and writes it, the help to the out sink and the usage to the err sink, refusing the whole text when it is over the root's help limit so nothing is cut short
+func helpWriteBounded(ctx: *Context, withDesc: bool) -> error {
+    // The chain the text is rendered against and the sinks are resolved along
+    chain: *Vector<*Command> = (*ctx).chain
+
+    // The whole text, measured before a byte of it is written
+    s: string = helpRenderParts((*ctx).cmd, chain, withDesc)
+    n: int64 = str_len(s)
+    limit: int64 = novaMaxHelpBytes((*ctx).root)
+
+    // A text over the limit is refused whole
+    if n > limit {
+        free(s)
+        return helpLimitErr(n, limit)
+    }
+
+    // Write the help to the out sink and the usage to the err sink
+    if withDesc {
+        sinkWrite(sinkResolveOut(chain), s)
+    } else {
+        sinkWrite(sinkResolveErr(chain), s)
+    }
+    free(s)
+    return error {}
+}
+
+// Writes "Error: <msg>" for a help text that was refused to the err sink of the context's chain and frees the message
+func helpReportRefusal(ctx: *Context, e: error) -> void {
+    // Nothing was refused
+    if !e.exists() {
+        return
+    }
+
+    // The line and the sink it goes to
+    line: string = textCat3("Error: ", e.message, "\n")
+    sinkWrite(sinkResolveErr((*ctx).chain), line)
+
+    // Free the line and the message
+    free(line)
+    free(e.message)
+}
+
+/**
+ * helpDispatchE
+ * Prints the help of the command ctx names, through the nearest help func on its chain or the default renderer, a default rendering over the root's help limit printing nothing at all
+ * @param ctx {*Context} - the context naming the command help was asked for
+ * @return a clean error, or the help limit error whose message the caller owns
+ **/
+export func helpDispatchE(ctx: *Context) -> error {
     // The chain the help func is resolved along
     chain: *Vector<*Command> = (*ctx).chain
 
@@ -558,20 +625,20 @@ export func helpDispatch(ctx: *Context) -> void {
         c: *Command = vec_get(chain, i)
         f := (*c).helpFunc
         f(ctx)
-        return
+        return error {}
     }
 
     // Otherwise render the help the default way
-    helpPrint((*ctx).cmd, chain)
+    return helpWriteBounded(ctx, true)
 }
 
 /**
- * usageDispatch
- * Prints the usage block of the command ctx names, through the nearest usage func on its chain or the default renderer
+ * usageDispatchE
+ * Prints the usage block of the command ctx names, through the nearest usage func on its chain or the default renderer, a default rendering over the root's help limit printing nothing at all
  * @param ctx {*Context} - the context naming the command usage was asked for
- * @return ...
+ * @return a clean error, or the help limit error whose message the caller owns
  **/
-export func usageDispatch(ctx: *Context) -> void {
+export func usageDispatchE(ctx: *Context) -> error {
     // The chain the usage func is resolved along
     chain: *Vector<*Command> = (*ctx).chain
 
@@ -583,11 +650,33 @@ export func usageDispatch(ctx: *Context) -> void {
         c: *Command = vec_get(chain, i)
         f := (*c).usageFunc
         f(ctx)
-        return
+        return error {}
     }
 
     // Otherwise render the usage block the default way
-    usagePrint((*ctx).cmd, chain)
+    return helpWriteBounded(ctx, false)
+}
+
+/**
+ * helpDispatch
+ * Prints the help of the command ctx names, through the nearest help func on its chain or the default renderer, a default rendering over the root's help limit writing an Error: line to the err sink instead
+ * @param ctx {*Context} - the context naming the command help was asked for
+ * @return ...
+ **/
+export func helpDispatch(ctx: *Context) -> void {
+    // Print it and report a refusal
+    helpReportRefusal(ctx, helpDispatchE(ctx))
+}
+
+/**
+ * usageDispatch
+ * Prints the usage block of the command ctx names, through the nearest usage func on its chain or the default renderer, a default rendering over the root's help limit writing an Error: line to the err sink instead
+ * @param ctx {*Context} - the context naming the command usage was asked for
+ * @return ...
+ **/
+export func usageDispatch(ctx: *Context) -> void {
+    // Print it and report a refusal
+    helpReportRefusal(ctx, usageDispatchE(ctx))
 }
 
 // The handler of the builtin help command, walks ctx.args as a child path from the root for as long as the words match
@@ -629,7 +718,7 @@ func helpCommandRun(ctx: *Context) -> int32 {
 
         // The usage of the root goes through its usage func when it has one, the way Cobra calls Root().Usage()
         uctx: *Context = alloc(Context { cmd: rootc, root: rootc, chain: rootchain, args: words, argv: (*ctx).argv })
-        usageDispatch(uctx)
+        helpReportRefusal(uctx, usageDispatchE(uctx))
 
         // Free the context and both chains
         free(uctx)
@@ -644,12 +733,19 @@ func helpCommandRun(ctx: *Context) -> int32 {
     hctx: *Context = alloc(Context { cmd: last, root: rootc, chain: chain, args: words, argv: (*ctx).argv })
 
     // Print the help through the nearest help func or the default renderer
-    helpDispatch(hctx)
+    he: error = helpDispatchE(hctx)
 
     // Free the context built for it and the chain
     free(hctx)
     vec_free(chain)
     free(chain)
+
+    // A help text over the limit is reported against the help command itself
+    if he.exists() {
+        code: int32 = ctx.fail(he.message)
+        free(he.message)
+        return code
+    }
     return 0
 }
 

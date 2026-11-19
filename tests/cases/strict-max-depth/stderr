@@ -1,0 +1,2 @@
+Error: commands nest deeper than the limit of 3
+Run 'strict nest deeper --help' for usage.

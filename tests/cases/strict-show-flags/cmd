@@ -1,0 +1,1 @@
+strict show -n bob -p +9 -r .25 -t a,b -t c -lll -m safe x y
